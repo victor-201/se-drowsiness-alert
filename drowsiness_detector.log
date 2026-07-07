@@ -1,0 +1,57 @@
+2026-07-07 22:22:40,706 - kivy - INFO - Kivy: v2.3.0
+2026-07-07 22:22:40,706 - kivy - INFO - Logger: Record log in /Users/huynhngocbinh/.kivy/logs/kivy_26-07-07_5.txt
+2026-07-07 22:22:40,706 - kivy - INFO - Kivy: Installed at "/Users/huynhngocbinh/Downloads/se-drowsiness-alert-main-2/venv/lib/python3.11/site-packages/kivy/__init__.py"
+2026-07-07 22:22:40,706 - kivy - INFO - Python: v3.11.15 (main, Mar  3 2026, 00:52:57) [Clang 17.0.0 (clang-1700.6.4.2)]
+2026-07-07 22:22:40,706 - kivy - INFO - Python: Interpreter at "/Users/huynhngocbinh/Downloads/se-drowsiness-alert-main-2/venv/bin/python"
+2026-07-07 22:22:40,706 - kivy - INFO - Logger: Purge log fired. Processing...
+2026-07-07 22:22:40,706 - kivy - INFO - Logger: Purge finished!
+2026-07-07 22:22:44,007 - kivy - INFO - Factory: 195 symbols loaded
+2026-07-07 22:22:53,477 - kivy - INFO - Image: Providers: img_tex, img_imageio, img_dds, img_sdl2, img_pil (img_ffpyplayer ignored)
+2026-07-07 22:23:00,404 - kivy - INFO - Text: Provider: sdl2
+2026-07-07 22:23:00,764 - kivy - INFO - Audio: Providers: audio_sdl2 (audio_ffpyplayer, audio_avplayer ignored)
+2026-07-07 22:23:01,149 - kivy - INFO - Window: Provider: sdl2
+2026-07-07 22:23:03,202 - kivy - INFO - GL: Using the "OpenGL ES 2" graphics system
+2026-07-07 22:23:03,202 - kivy - INFO - GL: Backend used <sdl2>
+2026-07-07 22:23:03,202 - kivy - INFO - GL: OpenGL version <b'2.1 Metal - 89.3'>
+2026-07-07 22:23:03,202 - kivy - INFO - GL: OpenGL vendor <b'Apple'>
+2026-07-07 22:23:03,202 - kivy - INFO - GL: OpenGL renderer <b'Apple M2'>
+2026-07-07 22:23:03,202 - kivy - INFO - GL: OpenGL parsed version: 2, 1
+2026-07-07 22:23:03,203 - kivy - INFO - GL: Shading version <b'1.20'>
+2026-07-07 22:23:03,203 - kivy - INFO - GL: Texture max size <16384>
+2026-07-07 22:23:03,203 - kivy - INFO - GL: Texture max units <16>
+2026-07-07 22:23:03,229 - kivy - INFO - Window: auto add sdl2 input provider
+2026-07-07 22:23:03,253 - kivy - INFO - Window: virtual keyboard not allowed, single mode, not docked
+2026-07-07 22:23:03,254 - src.core.detector - INFO - Initialized Haar cascade face detector
+2026-07-07 22:23:03,287 - src.core.detector - INFO - Initialized OpenCV DNN face detector (SSD)
+2026-07-07 22:23:03,290 - src.core.detector - INFO - Initialized dlib CNN face detector (MMOD)
+2026-07-07 22:23:03,290 - src.core.model_manager - INFO - Initializing facial landmark predictor
+2026-07-07 22:23:10,046 - src.ui.app - INFO - Camera khả dụng: []
+2026-07-07 22:23:10,084 - kivy - INFO - GL: BGRA texture support is available
+2026-07-07 22:23:10,094 - kivy - INFO - Base: Start application main loop
+2026-07-07 22:23:10,098 - kivy - INFO - GL: NPOT texture support is available
+2026-07-07 22:23:10,104 - src.core.detector - INFO - Initializing camera...
+2026-07-07 22:23:10,545 - src.core.detector - INFO - Camera initialized successfully
+2026-07-07 22:23:10,545 - root - INFO - Khởi tạo camera thành công
+2026-07-07 22:23:13,484 - root - INFO - Bắt đầu giám sát
+2026-07-07 22:23:25,485 - root - INFO - Dừng giám sát
+2026-07-07 22:23:25,486 - root - INFO - Bắt đầu hiệu chỉnh
+2026-07-07 22:23:25,533 - src.core.model_manager - INFO - Initializing face detector
+2026-07-07 22:23:30,448 - root - INFO - Hiệu chỉnh hoàn tất. Ngưỡng mắt mới: 0.282
+2026-07-07 22:23:32,170 - root - INFO - Bắt đầu giám sát
+2026-07-07 22:23:46,823 - root - INFO - CẢNH BÁO: Phát hiện buồn ngủ!
+2026-07-07 22:23:46,824 - root - INFO - Bắt đầu phát âm thanh cảnh báo
+2026-07-07 22:23:53,081 - root - INFO - CẢNH BÁO: Phát hiện buồn ngủ!
+2026-07-07 22:23:53,081 - root - INFO - Bắt đầu phát âm thanh cảnh báo
+2026-07-07 22:23:57,411 - root - INFO - CẢNH BÁO: Phát hiện buồn ngủ!
+2026-07-07 22:23:57,413 - root - INFO - Bắt đầu phát âm thanh cảnh báo
+2026-07-07 22:24:02,943 - root - INFO - CẢNH BÁO: Phát hiện buồn ngủ!
+2026-07-07 22:24:02,943 - root - INFO - Bắt đầu phát âm thanh cảnh báo
+2026-07-07 22:24:14,005 - root - INFO - CẢNH BÁO: Phát hiện buồn ngủ!
+2026-07-07 22:24:14,006 - root - INFO - Bắt đầu phát âm thanh cảnh báo
+2026-07-07 22:24:42,722 - root - INFO - Thoát ứng dụng
+2026-07-07 22:24:42,723 - root - INFO - Dừng giám sát
+2026-07-07 22:24:42,723 - root - INFO - Dọn dẹp tài nguyên
+2026-07-07 22:24:42,858 - src.core.facial_analyzer - INFO - Reset hiển thị
+2026-07-07 22:24:42,858 - src.core.detector - INFO - Camera stopped
+2026-07-07 22:24:42,858 - kivy - INFO - Base: Leaving application in progress...
+2026-07-07 22:24:42,860 - root - INFO - Dọn dẹp tài nguyên
