@@ -21,19 +21,19 @@ logger = logging.getLogger(__name__)
 class DrowsinessDetectorApp(App):
     def __init__(self):
         super().__init__()
-        self.config = Config()
+        self.app_config = Config()
         self.detector = DrowsinessDetector()
         self.image = Image(size_hint=(1, 1))
         self.status_label = Label(text='Trạng thái: Đã dừng', size_hint=(1, 0.1))
         self.settings = Settings()
-        self.sound_alert_dir = self.config.SOUND_ALERT_DIR
-        self.image_dir = self.config.IMAGE_DIR
-        self.alert_sound_file = self.config.ALERT_SOUND_FILE
-        self.fatigue_sound_file = self.config.FATIGUE_SOUND_FILE
-        self.ear_threshold = self.config.EAR_THRESHOLD
-        self.camera_width = self.config.CAMERA_WIDTH
-        self.camera_height = self.config.CAMERA_HEIGHT
-        self.camera_fps = self.config.CAMERA_FPS
+        self.sound_alert_dir = self.app_config.SOUND_ALERT_DIR
+        self.image_dir = self.app_config.IMAGE_DIR
+        self.alert_sound_file = self.app_config.ALERT_SOUND_FILE
+        self.fatigue_sound_file = self.app_config.FATIGUE_SOUND_FILE
+        self.ear_threshold = self.app_config.EAR_THRESHOLD
+        self.camera_width = self.app_config.CAMERA_WIDTH
+        self.camera_height = self.app_config.CAMERA_HEIGHT
+        self.camera_fps = self.app_config.CAMERA_FPS
         self.initialize_app()
         self.last_metrics = {
             'ear': None,
@@ -82,7 +82,7 @@ class DrowsinessDetectorApp(App):
         self.is_monitoring = False
         self.alert_active = False
         self.alert_stop_timer = None
-        self.alert_stop_delay = self.config.ALERT_STOP_DELAY
+        self.alert_stop_delay = self.app_config.ALERT_STOP_DELAY
         self.calibration_event = None
         self.calibration_start_time = None
         self.background_color = [0, 0, 0, 1]
@@ -228,7 +228,7 @@ class DrowsinessDetectorApp(App):
 
     def update_calibration(self, dt):
         # Cập nhật quá trình hiệu chỉnh
-        duration = self.config.CALIBRATION_DURATION
+        duration = self.app_config.CALIBRATION_DURATION
         elapsed = Clock.get_time() - self.calibration_start_time
         if elapsed >= duration:
             success, new_threshold = self.detector.finalize_calibration()

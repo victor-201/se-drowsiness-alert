@@ -170,7 +170,7 @@ class SettingsScreen(Screen):
             # Cập nhật camera nếu thay đổi
             if camera_changed and self.app.camera_initialized:
                 self.app.detector.stop_camera()
-                self.app.config.CAMERA_ID = new_camera_index
+                self.app.app_config.CAMERA_ID = new_camera_index
                 self.app.detector.config.CAMERA_ID = new_camera_index
                 self.app.detector.start_camera()
                 logging.info(f"Chuyển camera: {new_camera_index}")
