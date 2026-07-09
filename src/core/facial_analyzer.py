@@ -303,7 +303,7 @@ class FacialAnalyzer:
         nose_height = euclidean_distance(nose_bridge, nose_tip)
 
         pitch_ratio = nose_height / face_height if face_height > 0 else 0
-        pitch_angle = (pitch_ratio - 0.35) * 180
+        pitch_angle = (pitch_ratio - 0.35) * 100
 
         return roll_angle, pitch_angle, pitch_ratio
 

@@ -119,11 +119,15 @@ class DrowsinessDetector:
         self.face_net_dnn = self._init_face_detector_dnn()
         self.face_cnn_detector = self._init_face_detector_cnn()
         self.landmark_predictor = self.model_manager.predictor
-        self.head_tilt_threshold = self.config.HEAD_TILT_THRESHOLD
+        self.roll_threshold = self.config.HEAD_TILT_THRESHOLD
+        self.pitch_threshold = self.config.PITCH_THRESHOLD
         self.head_tilt_frames = self.config.HEAD_TILT_FRAMES
         self.head_tilt_counter = 0
         self.reference_roll = None
         self.reference_pitch = None
+        self.roll_history = deque(maxlen=self.config.CALIBRATION_FRAMES)
+        self.pitch_history = deque(maxlen=self.config.CALIBRATION_FRAMES)
+        self.calibrated = False
         self.blink_total = 0
         self.blink_per_minute_threshold = self.config.BLINK_PER_MINUTE_THRESHOLD
         self.yawn_threshold = self.config.YAWN_THRESHOLD
@@ -135,6 +139,7 @@ class DrowsinessDetector:
         self.mouth_open = False
         self.eye_closed = False
         self.ear_history = deque(maxlen=30)
+        self.eye_closed_counter = 0
         self.blink_times = deque(maxlen=100)
         self.fatigue_alert = False
         self.fatigue_start_time = None
@@ -272,7 +277,8 @@ class DrowsinessDetector:
         if len(self.ear_history) < self.blink_consec_frames:
             return False
         recent_ear_avg = float(np.mean(list(self.ear_history)[-10:])) if len(self.ear_history) >= 10 else float(np.mean(self.ear_history))
-        dynamic_threshold = min(self.ear_threshold, recent_ear_avg * 0.8)
+        min_threshold = self.ear_threshold * 0.6
+        dynamic_threshold = max(min_threshold, min(self.ear_threshold, recent_ear_avg * 0.8))
         if not self.eye_closed and ear < dynamic_threshold:
             self.eye_closed = True
             return False
@@ -426,9 +432,17 @@ class DrowsinessDetector:
             mar = self.analyzer.calculate_mar(mouth)
             roll_angle, pitch_angle, pitch_ratio = self.analyzer.calculate_head_pose(shape_np)
 
-            if self.reference_roll is None:
-                self.reference_roll = roll_angle
-                self.reference_pitch = pitch_angle
+            if not self.calibrated:
+                self.roll_history.append(roll_angle)
+                self.pitch_history.append(pitch_angle)
+                if len(self.roll_history) >= self.config.CALIBRATION_FRAMES:
+                    self.reference_roll = float(np.median(self.roll_history))
+                    self.reference_pitch = float(np.median(self.pitch_history))
+                    self.calibrated = True
+            elif self.reference_roll is not None:
+                drift = 0.002
+                self.reference_roll = (1 - drift) * self.reference_roll + drift * roll_angle
+                self.reference_pitch = (1 - drift) * self.reference_pitch + drift * pitch_angle
 
             edges_left = self.analyzer.apply_canny_on_eye(gray_eq, left_eye, 50, 150)
             edges_right = self.analyzer.apply_canny_on_eye(gray_eq, right_eye, 50, 150)
@@ -460,9 +474,14 @@ class DrowsinessDetector:
             yawn_frequent = self.check_yawn_frequency()
             fatigue_detected = blink_frequent or yawn_frequent
 
+            if self.eye_closed:
+                self.eye_closed_counter += 1
+            else:
+                self.eye_closed_counter = 0
+
             delta_roll = abs(roll_angle - self.reference_roll) if self.reference_roll is not None else 0
             delta_pitch = abs(pitch_angle - self.reference_pitch) if self.reference_pitch is not None else 0
-            head_tilted = delta_roll > self.head_tilt_threshold or delta_pitch > self.head_tilt_threshold
+            head_tilted = delta_roll > self.roll_threshold or delta_pitch > self.pitch_threshold
             if head_tilted:
                 self.head_tilt_counter += 1
                 if self.head_tilt_counter >= self.head_tilt_frames:
@@ -470,7 +489,7 @@ class DrowsinessDetector:
             else:
                 self.head_tilt_counter = max(0, self.head_tilt_counter - 1)
 
-            if ear < self.ear_threshold:
+            if ear < self.ear_threshold or self.eye_closed_counter >= self.ear_consec_frames:
                 self.eye_counter += 1
                 if self.eye_counter == 1:
                     self.drowsiness_start_time = time.time()
@@ -535,6 +554,9 @@ class DrowsinessDetector:
     def reset_head_reference(self):
         self.reference_roll = None
         self.reference_pitch = None
+        self.roll_history.clear()
+        self.pitch_history.clear()
+        self.calibrated = False
 
     def process_calibration_frame(self):
         if not self.camera or not self.camera.isOpened():

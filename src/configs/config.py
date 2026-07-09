@@ -10,8 +10,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 class Config:
     EAR_THRESHOLD = 0.22
     EAR_CONSEC_FRAMES = 15
-    HEAD_TILT_THRESHOLD = 45
+    HEAD_TILT_THRESHOLD = 15
+    PITCH_THRESHOLD = 25
     HEAD_TILT_FRAMES = 20
+    CALIBRATION_FRAMES = 30
     BLINK_CONSEC_FRAMES = 3
     BLINK_PER_MINUTE_THRESHOLD = 25
     YAWN_THRESHOLD = 0.3

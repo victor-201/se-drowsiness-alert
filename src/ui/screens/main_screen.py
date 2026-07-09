@@ -95,7 +95,7 @@ class MainScreen(Screen):
                     text_size=(None, None),
                     padding=(10, 0)
                 ),
-                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.head_tilt_threshold, size_hint=(1, 0.1), bar_length=150)
+                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.roll_threshold, size_hint=(1, 0.1), bar_length=150)
             },
             'pitch_angle': {
                 'label': Label(
@@ -107,7 +107,7 @@ class MainScreen(Screen):
                     text_size=(None, None),
                     padding=(10, 0)
                 ),
-                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.head_tilt_threshold, size_hint=(1, 0.1), bar_length=150)
+                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.pitch_threshold, size_hint=(1, 0.1), bar_length=150)
             },
             'blink_count': {
                 'label': Label(
@@ -315,7 +315,7 @@ class MainScreen(Screen):
         self.metrics_widgets['roll_angle'][
             'label'].text = f'Góc nghiêng: {roll_angle:.1f}°' if roll_angle is not None else 'Góc nghiêng: --'
         self.metrics_widgets['roll_angle']['label'].color = [1, 0, 0,
-                                                             1] if is_alert and roll_angle is not None and abs(roll_value) > self.app.detector.head_tilt_threshold else [
+                                                             1] if is_alert and roll_angle is not None and abs(roll_value) > self.app.detector.roll_threshold else [
             1, 1, 1, 1]
         if roll_angle is not None:
             self.metrics_widgets['roll_angle']['bar'].value = abs(roll_value)
@@ -323,7 +323,7 @@ class MainScreen(Screen):
         self.metrics_widgets['pitch_angle'][
             'label'].text = f'Góc cúi: {pitch_angle:.1f}°' if pitch_angle is not None else 'Góc cúi: --'
         self.metrics_widgets['pitch_angle']['label'].color = [1, 0, 0,
-                                                              1] if is_alert and pitch_angle is not None and abs(pitch_value) > self.app.detector.head_tilt_threshold else [
+                                                              1] if is_alert and pitch_angle is not None and abs(pitch_value) > self.app.detector.pitch_threshold else [
             1, 1, 1, 1]
         if pitch_angle is not None:
             self.metrics_widgets['pitch_angle']['bar'].value = abs(pitch_value)

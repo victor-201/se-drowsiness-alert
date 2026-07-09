@@ -9,11 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
-    def __init__(self, ear_threshold=0.22, mar_threshold=0.3, head_tilt_threshold=45.0,
+    def __init__(self, ear_threshold=0.22, mar_threshold=0.3, head_tilt_threshold=15.0,
                  ear_consec_frames=15, head_tilt_frames=20):
         self.ear_threshold = ear_threshold
         self.mar_threshold = mar_threshold
-        self.head_tilt_threshold = head_tilt_threshold
+        self.roll_threshold = head_tilt_threshold
+        self.pitch_threshold = head_tilt_threshold
         self.ear_consec_frames = ear_consec_frames
         self.head_tilt_frames = head_tilt_frames
         self.reset()
@@ -42,7 +43,7 @@ class MetricsCollector:
             self.eye_counter = 0
         drowsy_pred = self.eye_counter >= self.ear_consec_frames
 
-        if abs(roll_angle) > self.head_tilt_threshold or abs(pitch_angle) > self.head_tilt_threshold:
+        if abs(roll_angle) > self.roll_threshold or abs(pitch_angle) > self.pitch_threshold:
             self.head_tilt_counter += 1
         else:
             self.head_tilt_counter = max(0, self.head_tilt_counter - 1)
@@ -163,6 +164,7 @@ def evaluate_on_video(video_path, config, output_dir='evaluation_results'):
         ear_consec_frames=config.EAR_CONSEC_FRAMES,
         head_tilt_frames=config.HEAD_TILT_FRAMES
     )
+    collector.pitch_threshold = config.PITCH_THRESHOLD
 
     frame_count = 0
     while True:
