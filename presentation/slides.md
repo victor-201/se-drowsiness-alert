@@ -21,20 +21,66 @@ class: invert
 
 **Giả thuyết:** EAR=0.22, MAR=0.30, HEAD_TILT=15° cho F1 ≥ 0.85
 
+**Dữ liệu:** Webcam thực tế — 640×480, 30 FPS
+
 ---
 
 ## Pipeline Tổng Quan
 
 ```
 Camera → Tiền xử lý → Face Detection → Landmarks → ROI → Phân loại → Cảnh báo
-  (BGR)   (Gray+CLAHE)  (HOG+SVM)   (68 điểm)  (Mắt/Miệng) (EAR/MAR)  (Âm thanh)
+  (BGR)   (Gray+CLAHE)  (Haar+DNN+CNN+NMS) (68 điểm) (Mắt/Miệng) (EAR/MAR)  (Âm thanh)
+                               ↓
+                          Canny Edge + Otsu Threshold
+                               ↓
+                     Connected Components → Iris detection
 ```
 
-**4 kỹ thuật từ chương trình học:**  
-- Ch.2: Lọc ảnh, CLAHE  
-- Ch.3: 68 facial landmarks  
-- Ch.4: Phân đoạn ROI  
-- Ch.5: Phân loại threshold
+**6 kỹ thuật từ chương trình học:**  
+| Ch. | Kỹ thuật |
+|-----|----------|
+| 2 | Grayscale, CLAHE, lọc Gaussian |
+| 3 | Haar Cascade, DNN SSD, CNN MMOD (dlib fallback), Canny edge (Sobel, NMS, hysteresis), 68 landmarks |
+| 4 | ROI segmentation, **Otsu threshold**, **Connected Components** |
+| 5 | Threshold classification (EAR, MAR, head pose) |
+
+→ **5/6 kỹ thuật thuộc Ch.3–5** (đáp ứng yêu cầu ≥2 kỹ thuật chuyên sâu)
+
+---
+
+## Ảnh Minh Họa Trung Gian
+
+<!-- Yêu cầu bắt buộc: ảnh sau từng bước xử lý -->
+
+```
+Ảnh gốc → Grayscale → CLAHE → Face Detection → Landmarks → ROI → Canny → Kết quả
+```
+
+**Kỹ thuật Ch.2 — Tiền xử lý:**  
+`Ảnh gốc (BGR)` → `Grayscale` → `CLAHE (clip=2.0, tile=8×8)`
+
+**Kỹ thuật Ch.3 — Phát hiện khuôn mặt:**  
+`Haar Cascade` → `DNN SSD` → `CNN MMOD (fallback)` → `NMS (IoU=0.4)` → `False Positive Filter` → `dlib 68 landmarks`
+
+**Kỹ thuật Ch.3 — Phát hiện cạnh & đặc trưng:**  
+`Canny edge (sigma=1.0)` → `Otsu threshold` → `Connected Components`
+
+**Kỹ thuật Ch.4 — Phân đoạn:**  
+`ROI mắt/miệng` → `Otsu threshold tự động` → `Connected Components (blob)`
+
+---
+
+## Phân Công Công Việc
+
+| TV | Vai trò | Ch. | Công việc chính |
+|----|---------|:---:|-----------------|
+| **[Nhóm trưởng]** | Kiến trúc hệ thống | — | Thiết kế pipeline, tích hợp module, quản lý tiến độ |
+| SV2 | Tiền xử lý ảnh | **Ch.2** | Grayscale, CLAHE, lọc Gaussian |
+| SV3 | Phát hiện khuôn mặt & Landmark | **Ch.3** | Haar Cascade, HOG, DNN, 68 landmarks |
+| SV4 | Phát hiện cạnh | **Ch.3** | Canny edge (Sobel, NMS, hysteresis) |
+| SV5 | Phân đoạn ảnh | **Ch.4** | ROI, Otsu threshold, Connected Components |
+| SV6 | Nhận dạng & Phân loại | **Ch.5** | EAR, MAR, head pose, threshold classification |
+| SV7 | UI, Cảnh báo & Đánh giá | — | Kivy, alert, metrics, notebook, báo cáo |
 
 ---
 
@@ -47,6 +93,18 @@ Camera → Tiền xử lý → Face Detection → Landmarks → ROI → Phân lo
 - 👄 MAR — phát hiện ngáp
 - 🤕 Head Pose — phát hiện nghiêng đầu
 - 🔊 Cảnh báo âm thanh + hình ảnh
+
+---
+
+## Khảo Sát Canny Edge (sigma)
+
+| Sigma | Chất lượng cạnh |
+|-------|----------------|
+| **0.5** | Nhiễu, khó xác định đồng tử |
+| **1.0** | Cân bằng — viền mí & đồng tử rõ ✅ |
+| **1.5** | Mất chi tiết nhỏ, đồng tử không rõ |
+
++ Otsu threshold tự động thay vì ngưỡng cố định
 
 ---
 
@@ -128,11 +186,14 @@ Nhận xét:
 
 ## Kết Luận
 
-- ✅ Pipeline hoàn chỉnh với 4 kỹ thuật CV
+- ✅ Pipeline hoàn chỉnh với **6 kỹ thuật CV** (5 thuộc Ch.3–5)
+- ✅ Kỹ thuật: CLAHE, Haar Cascade, DNN SSD, CNN MMOD (dlib fallback), Canny edge, 68 landmarks, Otsu, Connected Components, EAR/MAR/Head Pose
 - ✅ Tham số tối ưu: EAR=0.22, MAR=0.30, HEAD_TILT=15°
-- ✅ F1-score **0.927** — vượt mục tiêu
+- ✅ F1-score **0.927** — vượt mục tiêu 0.85
+- ✅ Dữ liệu thực tế (webcam), độ trễ < 1s
+- ✅ Cả 4 giả thuyết đều được kiểm chứng đúng
 - ✅ 1.200+ dòng Python, kiến trúc MVC rõ ràng
-- 📊 Notebook + Báo cáo đầy đủ thí nghiệm
+- 📊 Notebook + Báo cáo đầy đủ thí nghiệm (ảnh trung gian + khảo sát tham số)
 
 ---
 

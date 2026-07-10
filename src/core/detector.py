@@ -356,30 +356,65 @@ class DrowsinessDetector:
         face_scores = []
 
         try:
+            faces_haar = self.detect_faces_haar(gray_eq)
+            if faces_haar:
+                face_boxes = faces_haar
+                face_scores = [0.5] * len(faces_haar)
+        except Exception as e:
+            logger.warning(f"Haar detection failed: {e}")
+
+        try:
             dnn_boxes, dnn_scores = self.detect_faces_dnn(frame)
             if dnn_boxes:
-                face_boxes = dnn_boxes
-                face_scores = dnn_scores
+                if face_boxes:
+                    face_boxes = face_boxes + dnn_boxes
+                    face_scores = face_scores + dnn_scores
+                    face_boxes, face_scores = non_max_suppression(face_boxes, face_scores, self.config.DNN_NMS_THRESHOLD)
+                else:
+                    face_boxes = dnn_boxes
+                    face_scores = list(dnn_scores)
         except Exception as e:
-            logger.warning(f"DNN face detection failed: {e}")
+            logger.warning(f"DNN detection failed: {e}")
 
-        if not face_boxes:
-            try:
-                faces_dlib = self.detect_faces_dlib(gray_eq)
-                if faces_dlib:
-                    face_boxes = [[f.left(), f.top(), f.right(), f.bottom()] for f in faces_dlib]
-                    face_scores = [0.9] * len(faces_dlib)
-            except Exception as e:
-                logger.warning(f"dlib face detection failed: {e}")
+        # Keep all faces detected by Haar + DNN (NMS already removes duplicates)
 
-        if not face_boxes:
+        # Fallback: CNN MMOD when too few faces found
+        if len(face_boxes) < 3:
             try:
-                faces_haar = self.detect_faces_haar(gray_eq)
-                if faces_haar:
-                    face_boxes = faces_haar
-                    face_scores = [0.5] * len(faces_haar)
+                cnn_boxes = self.detect_faces_cnn(gray_eq)
+                if cnn_boxes:
+                    cnn_scores = [0.85] * len(cnn_boxes)
+                    if face_boxes:
+                        face_boxes = face_boxes + cnn_boxes
+                        face_scores = face_scores + cnn_scores
+                        face_boxes, face_scores = non_max_suppression(face_boxes, face_scores, self.config.DNN_NMS_THRESHOLD)
+                    else:
+                        face_boxes = cnn_boxes
+                        face_scores = cnn_scores
             except Exception as e:
-                logger.warning(f"Haar face detection failed: {e}")
+                logger.warning(f"CNN face detection failed: {e}")
+
+        # Filter out false positives (too small, wrong aspect ratio)
+        img_h, img_w = frame.shape[:2]
+        min_face_size = 45
+        valid_boxes = []
+        valid_scores = []
+        for box, score in zip(face_boxes, face_scores):
+            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+            bw, bh = x2 - x1, y2 - y1
+            if bw < min_face_size or bh < min_face_size:
+                continue
+            aspect = bw / bh if bh > 0 else 0
+            if aspect < 0.3 or aspect > 3.0:
+                continue
+            # Low-confidence detections below 60% of image height are likely false positives
+            if score <= 0.5 and y1 > img_h * 0.6:
+                continue
+            valid_boxes.append(box)
+            valid_scores.append(score)
+        if valid_boxes:
+            face_boxes = valid_boxes
+            face_scores = valid_scores
 
         if not face_boxes:
             self.no_face_counter += 1
@@ -404,7 +439,7 @@ class DrowsinessDetector:
         face_box = face_boxes[0]
         face_vis = frame.copy()
         for fb in face_boxes:
-            cv2.rectangle(face_vis, (fb[0], fb[1]), (fb[2], fb[3]), (0, 255, 0), 2)
+            cv2.rectangle(face_vis, (int(fb[0]), int(fb[1])), (int(fb[2]), int(fb[3])), (0, 255, 0), 2)
         stage_images["03_face_detection"] = face_vis
 
         drowsiness_detected = False
