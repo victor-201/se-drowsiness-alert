@@ -9,8 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 def _add_weighted(src1, alpha, src2, beta, gamma, dst):
-    dst[:] = np.clip(src1.astype(np.float64) * alpha + src2.astype(np.float64) * beta + gamma, 0, 255).astype(np.uint8)
-    return dst
+    try:
+        cv2.addWeighted(src1, alpha, src2, beta, gamma, dst=dst)
+        return dst
+    except Exception as e:
+        logger.warning(f"Native cv2.addWeighted failed, falling back: {e}")
+        dst[:] = np.clip(src1.astype(np.float64) * alpha + src2.astype(np.float64) * beta + gamma, 0, 255).astype(np.uint8)
+        return dst
 
 
 def _bgr_to_rgb(bgr):

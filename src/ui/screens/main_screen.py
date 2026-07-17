@@ -144,7 +144,7 @@ class MainScreen(Screen):
         # Xây dựng giao diện màn hình chính
         main_layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
         with main_layout.canvas.before:
-            Color(*self.app.background_color)
+            self.background_color_instruction = Color(*self.app.background_color)
             self.background_rect = Rectangle(pos=main_layout.pos, size=main_layout.size)
         main_layout.bind(pos=self.update_background_rect, size=self.update_background_rect)
         

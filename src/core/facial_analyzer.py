@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+import cv2
 from math import atan2, degrees
 
 logger = logging.getLogger(__name__)
@@ -111,8 +112,13 @@ def _otsu_threshold(nms_map):
     return max(h, 10), max(l, 5)
 
 
+_CANNY_KERNEL_CACHE = {}
+
+
 def manual_canny(gray, sigma=0.8, low=None, high=None):
-    smoothed = _convolve2d(gray, _gaussian_kernel(sigma))
+    if sigma not in _CANNY_KERNEL_CACHE:
+        _CANNY_KERNEL_CACHE[sigma] = _gaussian_kernel(sigma)
+    smoothed = _convolve2d(gray, _CANNY_KERNEL_CACHE[sigma])
     _, _, M, theta = _compute_gradient(smoothed)
     nms = _non_max_suppression(M, theta)
     if low is None or high is None:
@@ -246,7 +252,12 @@ class FacialAnalyzer:
         self.max_ear = 0.40
 
     def apply_clahe(self, gray_frame):
-        return _clahe(gray_frame, clip_limit=2.0, tile_grid_size=(8, 8))
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            return clahe.apply(gray_frame)
+        except Exception as e:
+            logger.warning(f"Native OpenCV CLAHE failed, falling back to manual: {e}")
+            return _clahe(gray_frame, clip_limit=2.0, tile_grid_size=(8, 8))
 
     def calculate_ear(self, eye_points):
         points = np.array(eye_points, dtype=np.float32)
@@ -276,8 +287,20 @@ class FacialAnalyzer:
         roi = self.extract_eye_roi(gray, eye_points)
         if roi.size == 0:
             return np.zeros((10, 10), dtype=np.uint8)
-        edges = manual_canny(roi, sigma=0.8, low=low, high=high)
-        return edges
+        try:
+            # Apply Gaussian Blur first to match manual_canny's smoothing
+            blurred = cv2.GaussianBlur(roi, (3, 3), 0.8)
+            if low is None or high is None:
+                # Use Otsu's thresholding to determine thresholds automatically
+                high_val, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+                low_val = 0.5 * high_val
+            else:
+                low_val, high_val = low, high
+            edges = cv2.Canny(blurred, int(low_val), int(high_val))
+            return edges
+        except Exception as e:
+            logger.warning(f"Native OpenCV Canny failed, falling back to manual: {e}")
+            return manual_canny(roi, sigma=0.8, low=low, high=high)
 
     def detect_iris_by_contour(self, eye_edges):
         if eye_edges.size == 0:

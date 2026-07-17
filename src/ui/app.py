@@ -2,6 +2,8 @@ import os
 import cv2
 import logging
 import numpy as np
+import threading
+import queue
 from kivy.app import App
 from kivy.uix.image import Image
 from kivy.uix.label import Label
@@ -68,7 +70,6 @@ class DrowsinessDetectorApp(App):
             logging.warning(f"File âm thanh không tồn tại: {sound_path}")
 
     def setup_fatigue_sound(self):
-        # Thiết lập âm thanh thông báo mệt mỏi
         sound_path = self.fatigue_sound_file
         if os.path.exists(sound_path):
             self.fatigue_sound = SoundLoader.load(sound_path)
@@ -78,7 +79,6 @@ class DrowsinessDetectorApp(App):
             logging.warning(f"File âm thanh thông báo không tồn tại: {sound_path}")
 
     def setup_state_variables(self):
-        # Thiết lập các biến trạng thái
         self.is_monitoring = False
         self.alert_active = False
         self.alert_stop_timer = None
@@ -87,10 +87,37 @@ class DrowsinessDetectorApp(App):
         self.calibration_start_time = None
         self.background_color = [0, 0, 0, 1]
         self.screen_manager = None
+        self._main_screen_cache = None
+        self._capture_thread = None
+        self._processing_thread = None
+        self._stop_event = threading.Event()
+        self._frame_queue = queue.Queue(maxsize=1)
+        self._result_queue = queue.Queue(maxsize=1)
+        self._latest_frame = None
+        self._frame_lock = threading.Lock()
+
+    def _get_main_screen(self):
+        if self._main_screen_cache is None and self.screen_manager is not None:
+            self._main_screen_cache = self.screen_manager.get_screen('main')
+        return self._main_screen_cache
+
+    def _update_main_screen_metrics(self, ear_override=None):
+        main_screen = self._get_main_screen()
+        if main_screen is None:
+            return
+        ear = ear_override if ear_override is not None else self.last_metrics['ear']
+        main_screen.update_metrics(
+            ear,
+            self.last_metrics['mar'],
+            self.last_metrics['roll_angle'],
+            self.last_metrics['pitch_angle'],
+            self.last_metrics['blink_count'],
+            self.last_metrics['yawn_count']
+        )
 
     def build(self):
-        # Xây dựng giao diện ứng dụng
         self.screen_manager = ScreenManager()
+        self._main_screen_cache = None
         main_screen = MainScreen(app_instance=self, name='main')
         self.screen_manager.add_widget(main_screen)
         settings_screen = SettingsScreen(name='settings', app_instance=self)
@@ -110,168 +137,89 @@ class DrowsinessDetectorApp(App):
             self.status_label.text = 'Lỗi: Không khởi tạo được camera'
 
     def switch_to_settings(self, instance):
-        # Chuyển sang màn hình cài đặt
         self.stop_monitoring(instance)
         self.screen_manager.current = 'settings'
         logging.info("Chuyển sang màn hình cài đặt")
-        main_screen = self.screen_manager.get_screen('main')
-        main_screen.update_metrics(
-            self.last_metrics['ear'],
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
-            self.last_metrics['blink_count'],
-            self.last_metrics['yawn_count']
-        )
+        self._update_main_screen_metrics()
 
     def switch_to_main(self):
-        # Chuyển về màn hình chính
         self.screen_manager.current = 'main'
         logging.info("Chuyển về màn hình chính")
-        main_screen = self.screen_manager.get_screen('main')
-        main_screen.update_metrics(
-            self.last_metrics['ear'],
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
-            self.last_metrics['blink_count'],
-            self.last_metrics['yawn_count']
-        )
+        self._update_main_screen_metrics()
 
     def update_background_color(self):
-        # Cập nhật màu nền của màn hình
         if self.screen_manager.current == 'main':
-            main_screen = self.screen_manager.get_screen('main')
-            with main_screen.canvas.before:
-                Color(*self.background_color)
-                main_screen.background_rect = Rectangle(pos=main_screen.pos, size=main_screen.size)
+            main_screen = self._get_main_screen()
+            if main_screen is None or not hasattr(main_screen, 'background_color_instruction'):
+                return
+            main_screen.background_color_instruction.rgba = self.background_color
 
     def exit_app(self, instance):
-        # Thoát ứng dụng
         logging.info("Thoát ứng dụng")
         self.stop_monitoring(instance)
         App.get_running_app().stop()
 
     def _update_wrapper(self, dt):
-        # Cập nhật trạng thái ứng dụng theo chu kỳ
         if self.is_monitoring and self.camera_initialized:
-            self.update()
+            self._consume_frame_result()
         elif self.calibration_event and self.camera_initialized:
             self.update_calibration(dt)
         else:
-            main_screen = self.screen_manager.get_screen('main')
-            main_screen.update_metrics(
-                self.last_metrics['ear'],
-                self.last_metrics['mar'],
-                self.last_metrics['roll_angle'],
-                self.last_metrics['pitch_angle'],
-                self.last_metrics['blink_count'],
-                self.last_metrics['yawn_count']
-            )
+            self._update_main_screen_metrics()
 
-    def start_monitoring(self, instance):
-        # Bắt đầu giám sát
-        if not self.camera_initialized:
-            self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
-            logging.error("Không thể bắt đầu giám sát: Camera chưa khởi tạo")
-            return
-        self.detector.reset_head_reference()
-        self.is_monitoring = True
-        self.status_label.text = 'Trạng thái: Đang giám sát'
-        self.background_color = [0, 0, 0, 1]
-        self.update_background_color()
-        logging.info("Bắt đầu giám sát")
+    def _capture_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                if not self.detector.camera or not self.detector.camera.isOpened():
+                    try:
+                        self.detector.start_camera()
+                    except Exception as e:
+                        logger.error(f"Reinit camera failed: {e}")
+                        self._stop_event.wait(1.0)
+                        continue
+                ret, frame = self.detector.camera.read()
+                if ret and frame is not None:
+                    frame = cv2.resize(frame, (self.detector.config.CAMERA_WIDTH, self.detector.config.CAMERA_HEIGHT))
+                    if self._frame_queue.full():
+                        try:
+                            self._frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                    self._frame_queue.put_nowait(frame)
+                else:
+                    self._stop_event.wait(0.05)
+            except Exception as e:
+                logger.error(f"Capture error: {e}")
+                self._stop_event.wait(0.1)
 
-    def stop_monitoring(self, instance):
-        # Dừng giám sát
-        self.is_monitoring = False
-        self.alert_active = False
-        self.status_label.text = 'Trạng thái: Đã dừng'
-        self.image.texture = None
-        if self.alert_sound:
-            self.alert_sound.stop()
-        if self.fatigue_sound:
-            self.fatigue_sound.stop()
-        if self.alert_stop_timer:
-            self.alert_stop_timer.cancel()
-            self.alert_stop_timer = None
-        if self.calibration_event:
-            self.calibration_event.cancel()
-            self.calibration_event = None
-        self.background_color = [0, 0, 0, 1]
-        self.update_background_color()
-        main_screen = self.screen_manager.get_screen('main')
-        main_screen.update_metrics(
-            self.last_metrics['ear'],
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
-            self.last_metrics['blink_count'],
-            self.last_metrics['yawn_count']
-        )
-        logging.info("Dừng giám sát")
+    def _processing_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                try:
+                    frame = self._frame_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                result_frame, alert_detected, metrics = self.detector.process_frame_from_frame(frame)
+                result = (result_frame, alert_detected, metrics)
+                if self._result_queue.full():
+                    try:
+                        self._result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                self._result_queue.put_nowait(result)
+            except Exception as e:
+                logger.error(f"Processing error (thread): {e}")
 
-    def calibrate(self, instance):
-        # Hiệu chỉnh ứng dụng
-        if not self.camera_initialized:
-            self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
-            logging.error("Không thể hiệu chỉnh: Camera chưa khởi tạo")
-            return
-        self.stop_monitoring(instance)
-        self.status_label.text = 'Trạng thái: Đang hiệu chỉnh...'
-        self.background_color = [0, 0, 0, 1]
-        self.update_background_color()
-        logging.info("Bắt đầu hiệu chỉnh")
-        self.detector.reset_calibration()
-        self.calibration_start_time = Clock.get_time()
-        self.calibration_event = Clock.schedule_interval(self.update_calibration, 1.0 / 30.0)
-
-    def update_calibration(self, dt):
-        # Cập nhật quá trình hiệu chỉnh
-        duration = self.app_config.CALIBRATION_DURATION
-        elapsed = Clock.get_time() - self.calibration_start_time
-        if elapsed >= duration:
-            success, new_threshold = self.detector.finalize_calibration()
-            self.calibration_event.cancel()
-            self.calibration_event = None
-            self.status_label.text = f'Trạng thái: Hiệu chỉnh hoàn tất ( Ngưỡng mắt mới: {new_threshold:.3f})' if success else 'Trạng thái: Hiệu chỉnh thất bại'
-            logging.info(
-                f"Hiệu chỉnh {'hoàn tất' if success else 'thất bại'}. Ngưỡng mắt mới: {new_threshold:.3f}" if success else "Hiệu chỉnh thất bại")
-            self.image.texture = None
-            self.background_color = [0, 0, 0, 1]
-            self.update_background_color()
-            main_screen = self.screen_manager.get_screen('main')
-            main_screen.update_metrics(
-                self.last_metrics['ear'],
-                self.last_metrics['mar'],
-                self.last_metrics['roll_angle'],
-                self.last_metrics['pitch_angle'],
-                self.last_metrics['blink_count'],
-                self.last_metrics['yawn_count']
-            )
-            return
-        frame, ear = self.detector.process_calibration_frame()
-        if frame is not None:
-            if not hasattr(self, '_texture') or self._texture is None or self._texture.size != (frame.shape[1], frame.shape[0]):
-                self._texture = Texture.create(size=(frame.shape[1], frame.shape[0]), colorfmt='bgr')
-            self._texture.blit_buffer(cv2.flip(frame, 0).tobytes(), colorfmt='bgr', bufferfmt='ubyte')
-            self.image.texture = self._texture
-            remaining = int(duration - elapsed)
-            self.status_label.text = f'Đang hiệu chỉnh... {remaining}s (Ngưỡng mắt: {ear:.2f})'
-            main_screen = self.screen_manager.get_screen('main')
-            main_screen.update_metrics(
-                ear if ear != 0.0 else self.last_metrics['ear'],
-                self.last_metrics['mar'],
-                self.last_metrics['roll_angle'],
-                self.last_metrics['pitch_angle'],
-                self.last_metrics['blink_count'],
-                self.last_metrics['yawn_count']
-            )
-
-    def update(self):
-        # Cập nhật trạng thái giám sát
+    def _consume_frame_result(self):
         try:
-            frame, alert_detected, metrics = self.detector.process_frame()
+            frame, alert_detected, metrics = self._result_queue.get_nowait()
+        except queue.Empty:
+            return
+        self._apply_frame_result(frame, alert_detected, metrics)
+
+    def _apply_frame_result(self, frame, alert_detected, metrics):
+        try:
+            face_detected = metrics.get('face_detected', False)
             ear = metrics.get('ear', self.last_metrics['ear'])
             mar = metrics.get('mar', self.last_metrics['mar'])
             roll_angle = metrics.get('roll_angle', self.last_metrics['roll_angle'])
@@ -280,19 +228,18 @@ class DrowsinessDetectorApp(App):
             yawn_count = metrics.get('yawn_count', self.detector.yawn_total)
 
             if frame is not None:
-                self.last_metrics['ear'] = ear
-                self.last_metrics['mar'] = mar
-                self.last_metrics['roll_angle'] = roll_angle
-                self.last_metrics['pitch_angle'] = pitch_angle
+                if face_detected:
+                    self.last_metrics['ear'] = ear
+                    self.last_metrics['mar'] = mar
+                    self.last_metrics['roll_angle'] = roll_angle
+                    self.last_metrics['pitch_angle'] = pitch_angle
+                # Blink and yawn counts are cumulative/independent of immediate face detection
                 self.last_metrics['blink_count'] = blink_count
                 self.last_metrics['yawn_count'] = yawn_count
 
             if frame is None or not isinstance(frame, np.ndarray):
                 self.status_label.text = 'Lỗi: Không lấy được khung hình'
-                if not isinstance(frame, np.ndarray):
-                    self.status_label.text = 'Lỗi: Khung hình không hợp lệ'
-                main_screen = self.screen_manager.get_screen('main')
-                main_screen.update_metrics(ear, mar, roll_angle, pitch_angle, blink_count, yawn_count)
+                self._update_main_screen_metrics()
                 return
 
             if not hasattr(self, '_texture') or self._texture is None or self._texture.size != (frame.shape[1], frame.shape[0]):
@@ -300,8 +247,7 @@ class DrowsinessDetectorApp(App):
             self._texture.blit_buffer(cv2.flip(frame, 0).tobytes(), colorfmt='bgr', bufferfmt='ubyte')
             self.image.texture = self._texture
 
-            main_screen = self.screen_manager.get_screen('main')
-            main_screen.update_metrics(ear, mar, roll_angle, pitch_angle, blink_count, yawn_count)
+            self._update_main_screen_metrics()
 
             if alert_detected and not self.alert_active:
                 if metrics.get('fatigue_detected', False):
@@ -341,22 +287,98 @@ class DrowsinessDetectorApp(App):
             self.status_label.text = 'Lỗi: Xử lý khung hình thất bại'
             self.background_color = [0, 0, 0, 1]
             self.update_background_color()
-            main_screen = self.screen_manager.get_screen('main')
-            main_screen.update_metrics(
-                self.last_metrics['ear'],
-                self.last_metrics['mar'],
-                self.last_metrics['roll_angle'],
-                self.last_metrics['pitch_angle'],
-                self.last_metrics['blink_count'],
-                self.last_metrics['yawn_count']
-            )
+            self._update_main_screen_metrics()
+
+    def start_monitoring(self, instance):
+        if not self.camera_initialized:
+            self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
+            logging.error("Không thể bắt đầu giám sát: Camera chưa khởi tạo")
+            return
+        self.detector.reset_head_reference()
+        self.is_monitoring = True
+        self.status_label.text = 'Trạng thái: Đang giám sát'
+        self.background_color = [0, 0, 0, 1]
+        self.update_background_color()
+        self._stop_event.clear()
+        for q in (self._frame_queue, self._result_queue):
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
+        self._capture_thread.start()
+        self._processing_thread.start()
+        logging.info("Bắt đầu giám sát")
+
+    def stop_monitoring(self, instance):
+        self.is_monitoring = False
+        self._stop_event.set()
+        self._capture_thread = None
+        self._processing_thread = None
+        self.alert_active = False
+        self.status_label.text = 'Trạng thái: Đã dừng'
+        self.image.texture = None
+        if self.alert_sound:
+            self.alert_sound.stop()
+        if self.fatigue_sound:
+            self.fatigue_sound.stop()
+        if self.alert_stop_timer:
+            self.alert_stop_timer.cancel()
+            self.alert_stop_timer = None
+        if self.calibration_event:
+            self.calibration_event.cancel()
+            self.calibration_event = None
+        self.background_color = [0, 0, 0, 1]
+        self.update_background_color()
+        self._update_main_screen_metrics()
+        logging.info("Dừng giám sát")
+
+    def calibrate(self, instance):
+        if not self.camera_initialized:
+            self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
+            logging.error("Không thể hiệu chỉnh: Camera chưa khởi tạo")
+            return
+        self.stop_monitoring(instance)
+        self.status_label.text = 'Trạng thái: Đang hiệu chỉnh...'
+        self.background_color = [0, 0, 0, 1]
+        self.update_background_color()
+        logging.info("Bắt đầu hiệu chỉnh")
+        self.detector.reset_calibration()
+        self.calibration_start_time = Clock.get_time()
+        self.calibration_event = Clock.schedule_interval(self.update_calibration, 1.0 / 30.0)
+
+    def update_calibration(self, dt):
+        duration = self.app_config.CALIBRATION_DURATION
+        elapsed = Clock.get_time() - self.calibration_start_time
+        if elapsed >= duration:
+            success, new_threshold = self.detector.finalize_calibration()
+            self.calibration_event.cancel()
+            self.calibration_event = None
+            self.status_label.text = f'Trạng thái: Hiệu chỉnh hoàn tất ( Ngưỡng mắt mới: {new_threshold:.3f})' if success else 'Trạng thái: Hiệu chỉnh thất bại'
+            logging.info(
+                f"Hiệu chỉnh {'hoàn tất' if success else 'thất bại'}. Ngưỡng mắt mới: {new_threshold:.3f}" if success else "Hiệu chỉnh thất bại")
+            self.image.texture = None
+            self.background_color = [0, 0, 0, 1]
+            self.update_background_color()
+            self._update_main_screen_metrics()
+            return
+        frame, ear = self.detector.process_calibration_frame()
+        if frame is not None:
+            if not hasattr(self, '_texture') or self._texture is None or self._texture.size != (frame.shape[1], frame.shape[0]):
+                self._texture = Texture.create(size=(frame.shape[1], frame.shape[0]), colorfmt='bgr')
+            self._texture.blit_buffer(cv2.flip(frame, 0).tobytes(), colorfmt='bgr', bufferfmt='ubyte')
+            self.image.texture = self._texture
+            remaining = int(duration - elapsed)
+            self.status_label.text = f'Đang hiệu chỉnh... {remaining}s (Ngưỡng mắt: {ear:.2f})'
+            self._update_main_screen_metrics(ear_override=ear)
 
     def start_alert(self):
-        # Bắt đầu phát âm thanh cảnh báo
         logging.info("Bắt đầu phát âm thanh cảnh báo")
         self.alert_active = True
         if self.fatigue_sound and self.fatigue_sound.state == 'play':
-            self.fatigue_sound.stop() 
+            self.fatigue_sound.stop()
             logging.info("Dừng âm thanh mệt mỏi để ưu tiên âm thanh cảnh báo")
         if self.alert_sound:
             self.alert_sound.stop()
@@ -370,11 +392,10 @@ class DrowsinessDetectorApp(App):
             self.alert_stop_timer = None
 
     def start_fatigue_alert(self):
-        # Bắt đầu phát âm thanh thông báo mệt mỏi
         logging.info("Bắt đầu phát âm thanh thông báo mệt mỏi")
         if self.alert_sound and self.alert_sound.state == 'play':
             logging.info("Ưu tiên âm thanh cảnh báo alert, bỏ qua âm thanh mệt mỏi")
-            return  
+            return
         self.alert_active = True
         if self.fatigue_sound:
             self.fatigue_sound.stop()
@@ -388,7 +409,6 @@ class DrowsinessDetectorApp(App):
             self.alert_stop_timer = None
 
     def stop_alert(self, dt):
-        # Dừng âm thanh cảnh báo
         self.alert_active = False
         if self.alert_sound:
             self.alert_sound.stop()
@@ -398,19 +418,16 @@ class DrowsinessDetectorApp(App):
         self.status_label.text = 'Trạng thái: Đang giám sát'
         self.background_color = [0, 0, 0, 1]
         self.update_background_color()
-        main_screen = self.screen_manager.get_screen('main')
-        main_screen.update_metrics(
-            self.last_metrics['ear'],
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
-            self.last_metrics['blink_count'],
-            self.last_metrics['yawn_count']
-        )
+        self._update_main_screen_metrics()
 
     def on_stop(self):
-        # Dọn dẹp tài nguyên khi ứng dụng dừng
         logging.info("Dọn dẹp tài nguyên")
+        self._stop_event.set()
+        self.is_monitoring = False
+        if self._capture_thread and self._capture_thread.is_alive():
+            self._capture_thread.join(timeout=2)
+        if self._processing_thread and self._processing_thread.is_alive():
+            self._processing_thread.join(timeout=2)
         if self.alert_stop_timer:
             self.alert_stop_timer.cancel()
         if self.alert_sound:
@@ -422,12 +439,4 @@ class DrowsinessDetectorApp(App):
         self.detector.stop_camera()
         self.background_color = [0, 0, 0, 1]
         self.update_background_color()
-        main_screen = self.screen_manager.get_screen('main')
-        main_screen.update_metrics(
-            self.last_metrics['ear'],
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
-            self.last_metrics['blink_count'],
-            self.last_metrics['yawn_count']
-        )
+        self._update_main_screen_metrics()

@@ -115,10 +115,27 @@ class DrowsinessDetector:
         self.no_face_counter = 0
         self.face_detected = False
         self.drowsiness_start_time = None
+        # Check if dlib was compiled with CUDA and if a GPU is available
+        self.dlib_cuda_available = False
+        try:
+            if hasattr(dlib, 'DLIB_USE_CUDA') and dlib.DLIB_USE_CUDA:
+                self.dlib_cuda_available = True
+            elif hasattr(dlib, 'cuda') and hasattr(dlib.cuda, 'get_num_devices') and dlib.cuda.get_num_devices() > 0:
+                self.dlib_cuda_available = True
+        except Exception:
+            pass
+
+        # CPU safety configuration: disable CNN by default unless CUDA is available or explicitly forced
+        self.use_cnn_fallback = getattr(self.config, 'USE_CNN_FALLBACK', self.dlib_cuda_available)
+
         self.face_cascade = self._init_face_cascade()
         self.face_net_dnn = self._init_face_detector_dnn()
-        self.face_cnn_detector = self._init_face_detector_cnn()
+        self.face_cnn_detector = self._init_face_detector_cnn() if self.use_cnn_fallback else None
         self.landmark_predictor = self.model_manager.predictor
+        self.last_cnn_check_time = 0.0
+        self.cnn_cooldown = 1.5  # seconds between CNN checks (run at most once per 1.5 seconds)
+        self.last_hog_check_time = 0.0
+        self.hog_cooldown = 0.3  # seconds between HOG checks when face is lost (run at most once per 0.3 seconds)
         self.roll_threshold = self.config.HEAD_TILT_THRESHOLD
         self.pitch_threshold = self.config.PITCH_THRESHOLD
         self.head_tilt_frames = self.config.HEAD_TILT_FRAMES
@@ -220,7 +237,7 @@ class DrowsinessDetector:
     def detect_faces_cnn(self, gray):
         if self.face_cnn_detector is None:
             return []
-        faces = self.face_cnn_detector(gray, 1)
+        faces = self.face_cnn_detector(gray, 0)
         boxes = []
         for f in faces:
             r = f.rect
@@ -245,7 +262,7 @@ class DrowsinessDetector:
         logger.info("Initializing camera...")
         if self.camera and self.camera.isOpened():
             return
-        backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
+        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY, cv2.CAP_MSMF]
         for index in [self.config.CAMERA_ID, 1]:
             for backend in backends:
                 try:
@@ -263,6 +280,10 @@ class DrowsinessDetector:
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.CAMERA_WIDTH)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.CAMERA_HEIGHT)
         self.camera.set(cv2.CAP_PROP_FPS, self.config.CAMERA_FPS)
+        try:
+            self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
         logger.info("Camera initialized successfully")
 
     def stop_camera(self):
@@ -344,13 +365,20 @@ class DrowsinessDetector:
             return None, False, self._empty_metrics()
 
         frame = cv2.resize(frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT))
+        return self._process_image(frame)
+
+    def process_frame_from_frame(self, frame):
+        self.reset_counters_if_needed()
+        return self._process_image(frame)
+
+    def _process_image(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        stage_images = {}
-
         gray_eq = self.analyzer.apply_clahe(gray)
-        stage_images["01_grayscale"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        stage_images["02_clahe"] = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
+        if self.save_pipeline:
+            stage_images = {}
+            stage_images["01_grayscale"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            stage_images["02_clahe"] = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
 
         face_boxes = []
         face_scores = []
@@ -376,23 +404,8 @@ class DrowsinessDetector:
         except Exception as e:
             logger.warning(f"DNN detection failed: {e}")
 
-        # Keep all faces detected by Haar + DNN (NMS already removes duplicates)
-
-        # Fallback: CNN MMOD when too few faces found
-        if len(face_boxes) < 3:
-            try:
-                cnn_boxes = self.detect_faces_cnn(gray_eq)
-                if cnn_boxes:
-                    cnn_scores = [0.85] * len(cnn_boxes)
-                    if face_boxes:
-                        face_boxes = face_boxes + cnn_boxes
-                        face_scores = face_scores + cnn_scores
-                        face_boxes, face_scores = non_max_suppression(face_boxes, face_scores, self.config.DNN_NMS_THRESHOLD)
-                    else:
-                        face_boxes = cnn_boxes
-                        face_scores = cnn_scores
-            except Exception as e:
-                logger.warning(f"CNN face detection failed: {e}")
+        # No slow/blocking CPU-based dlib HOG or CNN fallbacks are used to prevent Python GIL freezes.
+        # Haar Cascade and OpenCV DNN are extremely fast and sufficient.
 
         # Filter out false positives (too small, wrong aspect ratio)
         img_h, img_w = frame.shape[:2]
@@ -419,16 +432,17 @@ class DrowsinessDetector:
         if not face_boxes:
             self.no_face_counter += 1
             self.face_detected = False
-            stage_images["03_face_detection"] = frame.copy()
+            if self.save_pipeline:
+                stage_images["03_face_detection"] = frame.copy()
             if self.no_face_counter >= self.no_face_alert_frames:
                 frame = self.alert_system.render_distraction_alert(frame)
                 if self.save_pipeline:
                     for name, img in stage_images.items():
                         self.pipeline.save_stage(name, img)
                 return frame, True, self._empty_metrics()
-            stage_images["03_face_detection"] = frame.copy()
             frame = self.alert_system.put_text_unicode(frame, "Không phát hiện khuôn mặt", (20, 30), self.config.ALERT_COLOR, font_size=24)
             if self.save_pipeline:
+                stage_images["03_face_detection"] = frame.copy()
                 for name, img in stage_images.items():
                     self.pipeline.save_stage(name, img)
             return frame, False, self._empty_metrics()
@@ -437,10 +451,11 @@ class DrowsinessDetector:
         self.face_detected = True
 
         face_box = face_boxes[0]
-        face_vis = frame.copy()
-        for fb in face_boxes:
-            cv2.rectangle(face_vis, (int(fb[0]), int(fb[1])), (int(fb[2]), int(fb[3])), (0, 255, 0), 2)
-        stage_images["03_face_detection"] = face_vis
+        if self.save_pipeline:
+            face_vis = frame.copy()
+            for fb in face_boxes:
+                cv2.rectangle(face_vis, (int(fb[0]), int(fb[1])), (int(fb[2]), int(fb[3])), (0, 255, 0), 2)
+            stage_images["03_face_detection"] = face_vis
 
         drowsiness_detected = False
         head_tilt_detected = False
@@ -479,29 +494,30 @@ class DrowsinessDetector:
                 self.reference_roll = (1 - drift) * self.reference_roll + drift * roll_angle
                 self.reference_pitch = (1 - drift) * self.reference_pitch + drift * pitch_angle
 
-            edges_left = self.analyzer.apply_canny_on_eye(gray_eq, left_eye, 50, 150)
-            edges_right = self.analyzer.apply_canny_on_eye(gray_eq, right_eye, 50, 150)
-            self._last_canny_left = edges_left
-            self._last_canny_right = edges_right
+            if self.save_pipeline:
+                edges_left = self.analyzer.apply_canny_on_eye(gray_eq, left_eye, 50, 150)
+                edges_right = self.analyzer.apply_canny_on_eye(gray_eq, right_eye, 50, 150)
+                self._last_canny_left = edges_left
+                self._last_canny_right = edges_right
 
-            iris_area_left = self.analyzer.detect_iris_by_contour(edges_left)
-            iris_area_right = self.analyzer.detect_iris_by_contour(edges_right)
+                iris_area_left = self.analyzer.detect_iris_by_contour(edges_left)
+                iris_area_right = self.analyzer.detect_iris_by_contour(edges_right)
 
-            roi_vis = frame.copy()
-            cv2.polylines(roi_vis, [left_eye], True, (0, 255, 0), 1)
-            cv2.polylines(roi_vis, [right_eye], True, (0, 255, 0), 1)
-            cv2.polylines(roi_vis, [mouth], True, (0, 255, 0), 1)
-            stage_images["04_landmarks_roi"] = roi_vis
+                roi_vis = frame.copy()
+                cv2.polylines(roi_vis, [left_eye], True, (0, 255, 0), 1)
+                cv2.polylines(roi_vis, [right_eye], True, (0, 255, 0), 1)
+                cv2.polylines(roi_vis, [mouth], True, (0, 255, 0), 1)
+                stage_images["04_landmarks_roi"] = roi_vis
 
-            if edges_left.size > 0 and edges_right.size > 0:
-                h_l, w_l = edges_left.shape
-                h_r, w_r = edges_right.shape
-                max_h = max(h_l, h_r)
-                combined_w = w_l + w_r
-                canny_vis = np.zeros((max_h, combined_w), dtype=np.uint8)
-                canny_vis[:h_l, :w_l] = edges_left
-                canny_vis[:h_r, w_l:w_l + w_r] = edges_right
-                stage_images["05_canny_edges"] = cv2.cvtColor(canny_vis, cv2.COLOR_GRAY2BGR)
+                if edges_left.size > 0 and edges_right.size > 0:
+                    h_l, w_l = edges_left.shape
+                    h_r, w_r = edges_right.shape
+                    max_h = max(h_l, h_r)
+                    combined_w = w_l + w_r
+                    canny_vis = np.zeros((max_h, combined_w), dtype=np.uint8)
+                    canny_vis[:h_l, :w_l] = edges_left
+                    canny_vis[:h_r, w_l:w_l + w_r] = edges_right
+                    stage_images["05_canny_edges"] = cv2.cvtColor(canny_vis, cv2.COLOR_GRAY2BGR)
 
             self.detect_blink(ear)
             self.detect_yawn(mar)
@@ -548,7 +564,8 @@ class DrowsinessDetector:
 
             self.draw_facial_ratios(frame, shape_np)
 
-        stage_images["06_result"] = frame
+        if self.save_pipeline:
+            stage_images["06_result"] = frame
 
         if self.save_pipeline:
             fid = int(time.time() * 1000) % 100000
@@ -602,10 +619,27 @@ class DrowsinessDetector:
         frame = cv2.resize(frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT))
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray_eq = self.analyzer.apply_clahe(gray)
-        faces = self.detect_faces_dlib(gray_eq)
+        # Unified face detection for calibration (fast, no GIL freeze)
+        face_boxes = []
+        try:
+            faces_haar = self.detect_faces_haar(gray_eq)
+            if faces_haar:
+                face_boxes = faces_haar
+        except Exception:
+            pass
+        if not face_boxes:
+            try:
+                dnn_boxes, _ = self.detect_faces_dnn(frame)
+                if dnn_boxes:
+                    face_boxes = dnn_boxes
+            except Exception:
+                pass
+
         ear = 0.0
-        if faces:
-            shape = self.landmark_predictor(gray_eq, faces[0])
+        if face_boxes:
+            face_box = face_boxes[0]
+            dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
+            shape = self.landmark_predictor(gray_eq, dlib_face)
             shape_np = np.array([[p.x, p.y] for p in shape.parts()])
             left_eye = shape_np[36:42]
             right_eye = shape_np[42:48]
