@@ -9,6 +9,7 @@ from src.configs.config import Config
 from src.core.model_manager import ModelManager
 from src.core.facial_analyzer import FacialAnalyzer
 from src.core.alert_system import AlertSystem
+from src.core.custom_landmark_detector import CustomLandmarkDetector
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,10 @@ class DrowsinessDetector:
         self.face_net_dnn = self._init_face_detector_dnn()
         self.face_cnn_detector = self._init_face_detector_cnn() if self.use_cnn_fallback else None
         self.landmark_predictor = self.model_manager.predictor
+        self.custom_detector = CustomLandmarkDetector()
+        self.use_custom_landmark = self.config.USE_CUSTOM_LANDMARK_DETECTOR
+        self.compare_landmarks = self.config.COMPARE_LANDMARKS
+        self.last_comparison = None
         self.last_cnn_check_time = 0.0
         self.cnn_cooldown = 1.5  # seconds between CNN checks (run at most once per 1.5 seconds)
         self.last_hog_check_time = 0.0
@@ -469,18 +474,65 @@ class DrowsinessDetector:
         dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
 
         if dlib_face:
-            shape = self.landmark_predictor(gray_eq, dlib_face)
-            shape_np = np.array([[p.x, p.y] for p in shape.parts()])
+            if self.use_custom_landmark:
+                shape_np = self.custom_detector.detect_landmarks(gray_eq, face_box)
+                eye_states = self.custom_detector.last_eye_states
+                yawn_state = self.custom_detector.last_yawn_state
+            else:
+                shape = self.landmark_predictor(gray_eq, dlib_face)
+                shape_np = np.array([[p.x, p.y] for p in shape.parts()])
+                eye_states = None
+                yawn_state = None
+
+            if self.compare_landmarks and not self.use_custom_landmark:
+                custom_shape = self.custom_detector.detect_landmarks(gray_eq, face_box)
+                if custom_shape is not None:
+                    self.last_comparison = {
+                        'dlib': shape_np.copy(),
+                        'custom': custom_shape.copy(),
+                        'dlib_ear': None, 'custom_ear': None,
+                        'dlib_mar': None, 'custom_mar': None,
+                    }
+
+            if shape_np is None:
+                shape_np = np.zeros((68, 2), dtype=np.float32)
 
             left_eye = shape_np[36:42]
             right_eye = shape_np[42:48]
             mouth = shape_np[48:68]
 
-            left_ear = self.analyzer.calculate_ear(left_eye)
-            right_ear = self.analyzer.calculate_ear(right_eye)
-            ear = (left_ear + right_ear) / 2.0
-            mar = self.analyzer.calculate_mar(mouth)
+            # Use feature-based EAR if custom detector has eye state analysis
+            if self.use_custom_landmark and eye_states is not None:
+                re_openness = eye_states.get('right', {}).get('openness', 0.5)
+                le_openness = eye_states.get('left', {}).get('openness', 0.5)
+                re_ear_feat = self.analyzer.calculate_ear_from_openness(re_openness)
+                le_ear_feat = self.analyzer.calculate_ear_from_openness(le_openness)
+                ear_landmark = (self.analyzer.calculate_ear(left_eye) +
+                                self.analyzer.calculate_ear(right_eye)) / 2.0
+                ear_feature = (re_ear_feat + le_ear_feat) / 2.0
+                ear = 0.7 * ear_landmark + 0.3 * ear_feature
+            else:
+                left_ear = self.analyzer.calculate_ear(left_eye)
+                right_ear = self.analyzer.calculate_ear(right_eye)
+                ear = (left_ear + right_ear) / 2.0
+
+            # Use feature-based MAR if custom detector has yawn state
+            if self.use_custom_landmark and yawn_state is not None:
+                mouth_openness = yawn_state.get('openness', 0.0)
+                mar_feat = self.analyzer.calculate_mar_from_openness(mouth_openness)
+                mar_landmark = self.analyzer.calculate_mar(mouth)
+                mar = 0.7 * mar_landmark + 0.3 * mar_feat
+            else:
+                mar = self.analyzer.calculate_mar(mouth)
             roll_angle, pitch_angle, pitch_ratio = self.analyzer.calculate_head_pose(shape_np)
+
+            if self.compare_landmarks and self.last_comparison is not None:
+                cl = self.last_comparison
+                cl['custom_ear'] = ear
+                cl['custom_mar'] = mar
+                if 'dlib_ear' not in cl or cl['dlib_ear'] is None:
+                    cl['dlib_ear'] = ear
+                    cl['dlib_mar'] = mar
 
             if not self.calibrated:
                 self.roll_history.append(roll_angle)
@@ -586,18 +638,61 @@ class DrowsinessDetector:
             'drowsiness_detected': drowsiness_detected,
             'eye_counter': self.eye_counter,
             'head_tilt_counter': self.head_tilt_counter,
+            'detector_mode': 'custom' if self.use_custom_landmark else 'dlib',
+            'comparison': self.last_comparison,
+            'eye_states': eye_states if self.use_custom_landmark else None,
+            'yawn_state': yawn_state if self.use_custom_landmark else None,
         }
         return frame, drowsiness_detected or head_tilt_detected or fatigue_detected, metrics
 
     def draw_facial_ratios(self, frame, shape_np):
         if not frame.flags['C_CONTIGUOUS']:
             frame = np.ascontiguousarray(frame)
+
+        mode_label = "CUSTOM" if self.use_custom_landmark else "DLIB"
+        cv2.putText(frame, f"Detector: {mode_label}", (10, frame.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+        color = (0, 255, 0) if self.use_custom_landmark else (0, 200, 255)
         for i in range(68):
-            cv2.circle(frame, tuple(shape_np[i]), 1, self.config.PRIMARY_COLOR, -1)
-        cv2.polylines(frame, [shape_np[36:42]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[42:48]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[48:60]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[27:36]], True, self.config.PRIMARY_COLOR, 1)
+            cv2.circle(frame, tuple(shape_np[i].astype(int)), 1, color, -1)
+        cv2.polylines(frame, [shape_np[36:42].astype(int)], True, color, 1)
+        cv2.polylines(frame, [shape_np[42:48].astype(int)], True, color, 1)
+        cv2.polylines(frame, [shape_np[48:60].astype(int)], True, color, 1)
+        cv2.polylines(frame, [shape_np[27:36].astype(int)], True, color, 1)
+
+        if self.use_custom_landmark and hasattr(self.custom_detector, 'last_eye_states'):
+            eye_states = self.custom_detector.last_eye_states
+            for side, label in [('right', 'R'), ('left', 'L')]:
+                if side in eye_states:
+                    es = eye_states[side]
+                    state_text = f"{label}:{es['state'][:3].upper()}"
+                    state_color = (0, 255, 0) if es['state'] == 'open' else \
+                                  (0, 165, 255) if es['state'] == 'partial' else (0, 0, 255)
+                    y_off = 25 if side == 'right' else 45
+                    cv2.putText(frame, state_text, (10, y_off),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, state_color, 1)
+
+        if self.use_custom_landmark and self.custom_detector.last_yawn_state is not None:
+            ys = self.custom_detector.last_yawn_state
+            yawn_text = f"Yawn: {ys['state']}"
+            yawn_color = (0, 0, 255) if ys['is_yawning'] else \
+                         (0, 165, 255) if ys['state'] == 'open' else (0, 255, 0)
+            cv2.putText(frame, yawn_text, (10, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, yawn_color, 1)
+
+        if self.compare_landmarks and self.last_comparison is not None:
+            cl = self.last_comparison
+            if 'dlib' in cl and 'custom' in cl:
+                dlib_shape = cl['dlib']
+                custom_shape = cl['custom']
+                for i in [36, 42, 48]:
+                    cv2.circle(frame, tuple(dlib_shape[i].astype(int)), 4, (255, 0, 0), 1)
+                    cv2.circle(frame, tuple(custom_shape[i].astype(int)), 4, (0, 255, 255), 1)
+                diff = np.mean(np.abs(dlib_shape - custom_shape))
+                cv2.putText(frame, f"Mean diff: {diff:.1f}px", (10, 85),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
         return frame
 
     def reset_calibration(self):
@@ -639,15 +734,21 @@ class DrowsinessDetector:
         if face_boxes:
             face_box = face_boxes[0]
             dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
-            shape = self.landmark_predictor(gray_eq, dlib_face)
-            shape_np = np.array([[p.x, p.y] for p in shape.parts()])
-            left_eye = shape_np[36:42]
-            right_eye = shape_np[42:48]
-            left_ear = self.analyzer.calculate_ear(left_eye)
-            right_ear = self.analyzer.calculate_ear(right_eye)
-            ear = (left_ear + right_ear) / 2.0
-            self.calibration_ear_values.append(ear)
-            self.draw_facial_ratios(frame, shape_np)
+
+            if self.use_custom_landmark:
+                shape_np = self.custom_detector.detect_landmarks(gray_eq, face_box)
+            else:
+                shape = self.landmark_predictor(gray_eq, dlib_face)
+                shape_np = np.array([[p.x, p.y] for p in shape.parts()])
+
+            if shape_np is not None:
+                left_eye = shape_np[36:42]
+                right_eye = shape_np[42:48]
+                left_ear = self.analyzer.calculate_ear(left_eye)
+                right_ear = self.analyzer.calculate_ear(right_eye)
+                ear = (left_ear + right_ear) / 2.0
+                self.calibration_ear_values.append(ear)
+                self.draw_facial_ratios(frame, shape_np)
         return frame, ear
 
     def finalize_calibration(self):

@@ -127,6 +127,122 @@ def run_calibration():
     cv2.destroyAllWindows()
 
 
+def run_comparison():
+    import dlib
+    from src.core.model_manager import ModelManager
+    from src.core.facial_analyzer import FacialAnalyzer
+    from src.core.custom_landmark_detector import CustomLandmarkDetector
+
+    config = Config()
+    model_manager = ModelManager()
+    dlib_predictor = model_manager.predictor
+    dlib_detector = model_manager.detector
+    custom_detector = CustomLandmarkDetector()
+    analyzer = FacialAnalyzer()
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+    try:
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            logger.error("Cannot open camera for comparison")
+            return
+    except Exception as e:
+        logger.error(f"Camera init failed: {e}")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+
+    logger.info("Comparison mode: LEFT=Custom (Canny+Contour), RIGHT=dlib 68-landmark")
+    logger.info("Press 'q' to quit")
+
+    cv2.namedWindow("Comparison", cv2.WINDOW_NORMAL)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.03)
+            continue
+
+        frame = cv2.resize(frame, (config.CAMERA_WIDTH, config.CAMERA_HEIGHT))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_eq = analyzer.apply_clahe(gray)
+
+        faces = cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        if len(faces) == 0:
+            cv2.putText(frame, "No face", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.imshow("Comparison", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+
+        x, y, w, h = faces[0]
+        face_box = [int(x), int(y), int(x + w), int(y + h)]
+
+        custom_frame = frame.copy()
+        dlib_frame = frame.copy()
+
+        custom_shape = custom_detector.detect_landmarks(gray_eq, face_box)
+        if custom_shape is not None:
+            for i in range(68):
+                cv2.circle(custom_frame, tuple(custom_shape[i].astype(int)), 1, (0, 255, 0), -1)
+            cv2.polylines(custom_frame, [custom_shape[36:42].astype(int)], True, (0, 255, 0), 1)
+            cv2.polylines(custom_frame, [custom_shape[42:48].astype(int)], True, (0, 255, 0), 1)
+            cv2.polylines(custom_frame, [custom_shape[48:60].astype(int)], True, (0, 255, 0), 1)
+            cv2.polylines(custom_frame, [custom_shape[27:36].astype(int)], True, (0, 255, 0), 1)
+
+            c_left_ear = analyzer.calculate_ear(custom_shape[36:42])
+            c_right_ear = analyzer.calculate_ear(custom_shape[42:48])
+            c_ear = (c_left_ear + c_right_ear) / 2.0
+            c_mar = analyzer.calculate_mar(custom_shape[48:68])
+            cv2.putText(custom_frame, f"EAR: {c_ear:.3f}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(custom_frame, f"MAR: {c_mar:.3f}", (10, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(custom_frame, "CUSTOM (Canny+Contour)", (10, custom_frame.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+        dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
+        dlib_faces = dlib_detector(gray_eq)
+        if dlib_faces:
+            shape = dlib_predictor(gray_eq, dlib_faces[0])
+            dlib_shape = np.array([[p.x, p.y] for p in shape.parts()])
+            for i in range(68):
+                cv2.circle(dlib_frame, tuple(dlib_shape[i]), 1, (0, 200, 255), -1)
+            cv2.polylines(dlib_frame, [dlib_shape[36:42]], True, (0, 200, 255), 1)
+            cv2.polylines(dlib_frame, [dlib_shape[42:48]], True, (0, 200, 255), 1)
+            cv2.polylines(dlib_frame, [dlib_shape[48:60]], True, (0, 200, 255), 1)
+            cv2.polylines(dlib_frame, [dlib_shape[27:36]], True, (0, 200, 255), 1)
+
+            d_left_ear = analyzer.calculate_ear(dlib_shape[36:42])
+            d_right_ear = analyzer.calculate_ear(dlib_shape[42:48])
+            d_ear = (d_left_ear + d_right_ear) / 2.0
+            d_mar = analyzer.calculate_mar(dlib_shape[48:68])
+            cv2.putText(dlib_frame, f"EAR: {d_ear:.3f}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+            cv2.putText(dlib_frame, f"MAR: {d_mar:.3f}", (10, 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+            cv2.putText(dlib_frame, "DLIB 68-landmark", (10, dlib_frame.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+
+            if custom_shape is not None:
+                diff = np.mean(np.abs(dlib_shape - custom_shape))
+                cv2.putText(dlib_frame, f"Mean diff: {diff:.1f}px", (10, 65),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+        combined = np.hstack([custom_frame, dlib_frame])
+        cv2.imshow("Comparison", combined)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
 def run_kivy():
     from src.ui.app import DrowsinessDetectorApp
     DrowsinessDetectorApp().run()
@@ -136,6 +252,8 @@ if __name__ == '__main__':
     import sys
     if '--calibrate' in sys.argv:
         run_calibration()
+    elif '--compare' in sys.argv:
+        run_comparison()
     elif '--opencv' in sys.argv:
         run_detection(save_pipeline='--save-pipeline' in sys.argv)
     else:

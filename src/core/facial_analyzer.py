@@ -267,12 +267,125 @@ class FacialAnalyzer:
         ear = (A + B) / (2.0 * C) if C > 0 else 0.0
         return np.clip(ear, self.min_ear, self.max_ear)
 
+    def calculate_ear_from_openness(self, eye_openness):
+        """
+        Tính EAR ước tính từ openness ratio (0.0=closed, 1.0=open).
+        Dùng khi landmark không chính xác (mắt đóng).
+        """
+        return float(np.clip(eye_openness * 0.35 + 0.05, self.min_ear, self.max_ear))
+
     def calculate_mar(self, mouth_points):
         A = euclidean_distance(mouth_points[13], mouth_points[19])
         B = euclidean_distance(mouth_points[14], mouth_points[18])
         C = euclidean_distance(mouth_points[15], mouth_points[17])
         D = euclidean_distance(mouth_points[12], mouth_points[16])
         return (A + B + C) / (3.0 * D) if D > 0 else 0.0
+
+    def calculate_mar_from_openness(self, mouth_openness):
+        """
+        Tính MAR ước tính từ openness ratio (0.0=closed, 1.0=wide open).
+        Dùng khi landmark không chính xác (miệng ngáp).
+        """
+        return float(np.clip(mouth_openness * 0.6 + 0.05, 0.0, 1.0))
+
+    def detect_eye_openness(self, gray_eq, eye_points, margin=10):
+        """
+        Phân tích mức độ mở mắt từ contour analysis trên eye ROI.
+        Trả về openness ratio: 0.0 (đóng) -> 1.0 (mở).
+        """
+        pts = np.array(eye_points, dtype=np.int32)
+        x, y, w, h = _bounding_rect(pts)
+        x = max(0, x - margin)
+        y = max(0, y - margin)
+        w = min(gray_eq.shape[1] - x, w + 2 * margin)
+        h = min(gray_eq.shape[0] - y, h + 2 * margin)
+
+        if w < 8 or h < 6:
+            return 0.5
+
+        roi = gray_eq[y:y + h, x:x + w]
+        if roi.size == 0:
+            return 0.5
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        enhanced = clahe.apply(roi)
+        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0.8)
+
+        edges = cv2.Canny(blurred, 25, 80)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return 0.3
+
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        roi_area = w * h
+
+        if roi_area == 0:
+            return 0.3
+
+        area_ratio = area / roi_area
+        bx, by, bw, bh = cv2.boundingRect(largest)
+        aspect = bw / bh if bh > 0 else 10
+
+        openness = 0.0
+        openness += np.clip(area_ratio * 5.0, 0, 0.5)
+        if aspect < 3.0:
+            openness += 0.3
+        elif aspect < 5.0:
+            openness += 0.15
+
+        return float(np.clip(openness, 0.0, 1.0))
+
+    def detect_mouth_openness(self, gray_eq, face_box):
+        """
+        Phân tích mức độ mở miệng từ contour analysis.
+        Trả về openness ratio: 0.0 (đóng) -> 1.0 (ngáp rộng).
+        """
+        x1, y1, x2, y2 = [int(v) for v in face_box]
+        fw, fh = x2 - x1, y2 - y1
+
+        my1 = y1 + int(fh * 0.68)
+        my2 = y1 + int(fh * 0.85)
+        mx1 = x1 + int(fw * 0.25)
+        mx2 = x2 - int(fw * 0.25)
+
+        if my1 >= my2 or mx1 >= mx2:
+            return 0.0
+
+        roi = gray_eq[my1:my2, mx1:mx2]
+        if roi.size == 0:
+            return 0.0
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        enhanced = clahe.apply(roi)
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.0)
+
+        adaptive = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 21, 8
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3))
+        closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return 0.0
+
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        roi_area = roi.shape[0] * roi.shape[1]
+
+        bx, by, bw, bh = cv2.boundingRect(largest)
+        mar = bh / bw if bw > 0 else 0
+
+        openness = 0.0
+        openness += np.clip(area / roi_area * 4.0, 0, 0.4)
+        openness += np.clip(mar * 2.0, 0, 0.4)
+        if mar > 0.5:
+            openness += 0.2
+
+        return float(np.clip(openness, 0.0, 1.0))
 
     def extract_eye_roi(self, gray, eye_points, margin=10):
         pts = np.array(eye_points, dtype=np.int32)

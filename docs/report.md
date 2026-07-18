@@ -95,25 +95,25 @@ Bradski (2000) [6] giới thiệu OpenCV — thư viện xử lý ảnh nguồn 
 
 Pipeline xử lý của hệ thống được thiết kế theo kiến trúc từ thô đến tinh (coarse-to-fine), gồm 5 bước chính. Mỗi bước tương ứng với một hoặc nhiều kỹ thuật từ chương trình học.
 
-Bước 1 (Tiền xử lý — Chương 2): thực hiện chuyển BGR sang Grayscale để giảm chiều dữ liệu, lọc Gaussian (sigma = 1.0) để khử nhiễu tần số cao, và CLAHE (clip = 2.0, tile = 8×8) để cân bằng histogram cục bộ. Bước 2 (Phát hiện khuôn mặt — Chương 3): áp dụng ba phương pháp phát hiện khuôn mặt theo thứ tự ưu tiên — Haar Cascade (nhanh), DNN SSD (chính xác), và CNN MMOD dlib (fallback khi < 3 mặt) — sau đó kết hợp kết quả bằng Non-Maximum Suppression (NMS, IoU = 0.4) và bộ lọc loại bỏ false positive (kích thước, tỷ lệ khung hình, vị trí).
+Bước 1 (Tiền xử lý — Chương 2): thực hiện chuyển BGR sang Grayscale (thủ công bằng công thức 0.299R + 0.587G + 0.114B, không dùng cv2.cvtColor), lọc Gaussian (sigma = 0.8) để khử nhiễu tần số cao, và CLAHE (thủ công, clip = 2.0, tile = 8×8) để cân bằng histogram cục bộ — cả ba bước đều được implement từ scratch bằng numpy, không sử dụng các hàm có sẵn của OpenCV. Bước 2 (Phát hiện khuôn mặt — Chương 3): áp dụng ba phương pháp phát hiện khuôn mặt theo thứ tự ưu tiên — Haar Cascade (nhanh), DNN SSD (chính xác), và CNN MMOD dlib (fallback khi < 3 mặt) — sau đó kết hợp kết quả bằng Non-Maximum Suppression (NMS, IoU = 0.4) và bộ lọc loại bỏ false positive (kích thước, tỷ lệ khung hình, vị trí).
 
-Bước 3 (Xác định đặc trưng — Chương 3): dùng dlib shape predictor để lấy 68 điểm landmark, trích xuất ROI mắt trái (36–41), mắt phải (42–47), ROI miệng (48–67), và áp dụng Canny edge detection trên ROI mắt. Bước 4 (Phân đoạn ảnh — Chương 4): phân đoạn ROI mắt và miệng từ tọa độ landmark, áp dụng Otsu threshold để tự động chọn ngưỡng Canny hysteresis, và dùng Connected Components để tìm vùng đồng tử lớn nhất.
+Bước 3 (Xác định đặc trưng — Chương 3): dùng dlib shape predictor để lấy 68 điểm landmark, trích xuất ROI mắt trái (36–41), mắt phải (42–47), ROI miệng (48–67), và áp dụng Canny edge detection thủ công trên ROI mắt. Bước 4 (Phân đoạn ảnh — Chương 4): phân đoạn ROI mắt và miệng từ tọa độ landmark, áp dụng Otsu threshold để tự động chọn ngưỡng cao (high) cho Canny hysteresis (ngưỡng thấp = high / 2), và dùng Connected Components (Union-Find, 4-connected) để tìm vùng đồng tử lớn nhất.
 
 Bước 5 (Nhận dạng và phân loại — Chương 5): tính EAR để phát hiện nhắm mắt, MAR để phát hiện ngáp, head pose (roll ngưỡng 15° + pitch index ngưỡng 25) để phát hiện nghiêng hoặc cúi đầu, kết hợp với dynamic threshold blink detection và fatigue detection dựa trên tần suất nháy mắt và ngáp, sau đó kích hoạt cảnh báo âm thanh và hình ảnh tương ứng.
 
-Pipeline được tổ chức thành 6 kỹ thuật chính, trong đó 5 kỹ thuật thuộc Chương 3–5 (đáp ứng yêu cầu tối thiểu 2 kỹ thuật chuyên sâu), được trình bày chi tiết trong các mục sau.
+Pipeline được tổ chức thành 6 kỹ thuật chính, trong đó 5 kỹ thuật thuộc Chương 3–5 (đáp ứng yêu cầu tối thiểu 2 kỹ thuật chuyên sâu), được trình bày chi tiết trong các mục sau. Đáng chú ý, hầu hết các bước xử lý cốt lõi (BGR→Gray, resize, CLAHE, Canny edge, Otsu threshold, Connected Components) đều được **implement thủ công bằng numpy**, không sử dụng các hàm có sẵn của OpenCV.
 
 ### 3.2 Kỹ thuật 1 — Xử lý ảnh tiền xử lý (Chương 2)
 
 **Kỹ thuật áp dụng:** Toán tử điểm (chuyển đổi không gian màu BGR sang Grayscale) và lọc tuyến tính (Gaussian blur kết hợp CLAHE).
 
-**Chuyển BGR → Grayscale:** Không gian màu BGR có 3 kênh, mỗi kênh mang thông tin màu sắc. Tuy nhiên, các bước xử lý tiếp theo như phát hiện khuôn mặt Haar, dlib HOG, shape predictor đều hoạt động trên ảnh grayscale. Chuyển đổi giảm chiều dữ liệu từ 3 kênh xuống 1 kênh, tiết kiệm 2/3 bộ nhớ và thời gian xử lý. Công thức chuyển đổi sử dụng tỷ lệ phổ thông Gray = 0.299 × R + 0.587 × G + 0.114 × B.
+**Chuyển BGR → Grayscale:** Không gian màu BGR có 3 kênh, mỗi kênh mang thông tin màu sắc. Tuy nhiên, các bước xử lý tiếp theo như phát hiện khuôn mặt Haar, dlib HOG, shape predictor đều hoạt động trên ảnh grayscale. Chuyển đổi giảm chiều dữ liệu từ 3 kênh xuống 1 kênh, tiết kiệm 2/3 bộ nhớ và thời gian xử lý. Công thức chuyển đổi sử dụng tỷ lệ phổ thông Gray = 0.299 × R + 0.587 × G + 0.114 × B. **Lưu ý: được implement thủ công bằng numpy** (hàm manual_bgr_to_gray), tách từng kênh BGR và tính toán trực tiếp, không dùng cv2.cvtColor.
 
-**Lọc Gaussian:** Trước khi áp dụng Canny edge detection, ảnh grayscale được làm mờ bằng bộ lọc Gaussian với sigma = 1.0, kích thước kernel 5×5. Lọc Gaussian thực hiện tích chập ảnh với hàm Gaussian 2D, giúp loại bỏ nhiễu tần số cao (noise từ cảm biến camera) trước khi tính gradient, tránh phát hiện cạnh giả do nhiễu.
+**Lọc Gaussian:** Trước khi áp dụng Canny edge detection, ảnh grayscale được làm mờ bằng bộ lọc Gaussian với sigma = 0.8, kích thước kernel 5×5. Lọc Gaussian thực hiện tích chập ảnh với hàm Gaussian 2D, giúp loại bỏ nhiễu tần số cao (noise từ cảm biến camera) trước khi tính gradient, tránh phát hiện cạnh giả do nhiễu. Kernel được tạo động dựa trên sigma (bán kính = ceil(3 × sigma)).
 
-**CLAHE (Contrast Limited Adaptive Histogram Equalization):** CLAHE được áp dụng để tăng cường độ tương phản cục bộ của ảnh, đặc biệt quan trọng trong điều kiện ánh sáng không đồng đều. Khác với histogram equalization toàn cục, CLAHE chia ảnh thành các tile 8×8, thực hiện cân bằng histogram trên từng tile, sau đó nội suy song tuyến tính (bilinear interpolation) giữa các tile để tránh hiệu ứng block. Tham số clipLimit = 2.0 giới hạn độ khuếch đại histogram để tránh khuếch đại nhiễu.
+**CLAHE (Contrast Limited Adaptive Histogram Equalization):** CLAHE được áp dụng để tăng cường độ tương phản cục bộ của ảnh, đặc biệt quan trọng trong điều kiện ánh sáng không đồng đều. Khác với histogram equalization toàn cục, CLAHE chia ảnh thành các tile 8×8, thực hiện cân bằng histogram trên từng tile, sau đó nội suy song tuyến tính (bilinear interpolation) giữa các tile để tránh hiệu ứng block. Tham số clipLimit = 2.0 giới hạn độ khuếch đại histogram để tránh khuếch đại nhiễu. **Lưu ý: CLAHE được implement thủ công bằng numpy** (không dùng cv2.createCLAHE), gồm 2 bước: (1) tính CDF cho từng tile với clipping, (2) nội suy bilinear giữa các tile.
 
-**Tham số khảo sát:** clipLimit (1.0, 2.0, 3.0), tileGridSize ((4×4), (8×8), (16×16)), Kernel sigma Gaussian (0.5, 1.0, 1.5).
+**Tham số khảo sát:** clipLimit (1.0, 2.0, 3.0), tileGridSize ((4×4), (8×8), (16×16)), Kernel sigma Gaussian (0.5, 0.8, 1.0, 1.5).
 
 ### 3.3 Kỹ thuật 2 — Phát hiện khuôn mặt (Chương 3)
 
@@ -137,13 +137,13 @@ Sau khi phát hiện khuôn mặt, các bounding box từ cả ba phương pháp
 
 **Canny Edge Detection (implement thủ công):** Canny được chọn vì là thuật toán phát hiện cạnh kinh điển với ba tiêu chí: phát hiện đầy đủ (low error rate), định vị chính xác (good localization), và phản hồi duy nhất (minimal response). Pipeline Canny được implement thủ công gồm 4 bước.
 
-Bước 1 — Làm mờ Gaussian: tích chập ảnh với kernel Gaussian kích thước 5×5, sigma = 1.0 để loại bỏ nhiễu trước khi tính gradient. Bước 2 — Tính gradient Sobel: hai kernel Sobel X và Y (kích thước 3×3) được tích chập với ảnh đã làm mờ — Gx = [[-1, 0, +1], [-2, 0, +2], [-1, 0, +1]] ⊗ I và Gy = [[-1, -2, -1], [0, 0, 0], [+1, +2, +1]] ⊗ I. Biên độ gradient M = sqrt(Gx² + Gy²) và hướng gradient θ = atan2(Gy, Gx). Tích chập được implement thủ công bằng stride tricks kết hợp numpy einsum, không sử dụng OpenCV.
+Bước 1 — Làm mờ Gaussian: tích chập ảnh với kernel Gaussian kích thước 5×5, sigma = 0.8 (giá trị mặc định trong code) để loại bỏ nhiễu trước khi tính gradient. Bước 2 — Tính gradient Sobel: hai kernel Sobel X và Y (kích thước 3×3) được tích chập với ảnh đã làm mờ — Gx = [[-1, 0, +1], [-2, 0, +2], [-1, 0, +1]] ⊗ I và Gy = [[-1, -2, -1], [0, 0, 0], [+1, +2, +1]] ⊗ I. Biên độ gradient M = sqrt(Gx² + Gy²) và hướng gradient θ = atan2(Gy, Gx). Tích chập được implement thủ công bằng numpy stride tricks (tạo sliding window) kết hợp np.einsum ('ijkl,kl->ij'), không sử dụng OpenCV hay bất kỳ thư viện tích chập bên ngoài.
 
 Bước 3 — Non-Maximum Suppression (NMS): duyệt từng pixel, so sánh biên độ gradient của pixel hiện tại với hai pixel lân cận theo hướng gradient. Nếu pixel hiện tại không phải là cực đại địa phương, đặt biên độ về 0 để thu được các cạnh mảnh, một pixel. Bước 4 — Hysteresis threshold: sử dụng hai ngưỡng — ngưỡng thấp (low) và ngưỡng cao (high). Pixel có biên độ > high được xác nhận là cạnh. Pixel có biên độ < low bị loại bỏ. Pixel ở giữa hai ngưỡng được giữ nếu kết nối với pixel cạnh đã xác nhận theo 8-connected neighbors.
 
-**Otsu threshold:** Trong cài đặt mặc định, ngưỡng thấp của hysteresis được tính tự động bằng Otsu threshold thay vì cố định. Otsu tìm ngưỡng tối ưu bằng cách duyệt tất cả các giá trị ngưỡng có thể, chọn ngưỡng tối đa hóa phương sai giữa hai lớp (foreground — pixel cạnh và background — pixel không phải cạnh): σ²_B(t) = ω₁(t) × ω₂(t) × [μ₁(t) − μ₂(t)]², trong đó ω₁, ω₂ là trọng số và μ₁, μ₂ là kỳ vọng của hai lớp. Otsu tự động thích nghi với độ tương phản của từng frame, loại bỏ nhu cầu điều chỉnh ngưỡng thủ công.
+**Otsu threshold:** Trong cài đặt mặc định, ngưỡng hysteresis được tính tự động bằng Otsu threshold thay vì cố định. Otsu tìm ngưỡng tối ưu bằng cách duyệt tất cả các giá trị ngưỡng có thể, chọn ngưỡng tối đa hóa phương sai giữa hai lớp (foreground — pixel cạnh và background — pixel không phải cạnh): σ²_B(t) = ω₁(t) × ω₂(t) × [μ₁(t) − μ₂(t)]², trong đó ω₁, ω₂ là trọng số và μ₁, μ₂ là kỳ vọng của hai lớp. Kết quả Otsu trả về ngưỡng **cao** (high) — tương ứng với phân tách tối ưu trên histogram biên độ gradient, sau đó ngưỡng **thấp** (low) được đặt bằng high / 2. Otsu tự động thích nghi với độ tương phản của từng frame, loại bỏ nhu cầu điều chỉnh ngưỡng thủ công.
 
-**Tham số khảo sát:** Sigma Gaussian (0.5, 1.0, 1.5), ngưỡng hysteresis cố định (50/150, 100/200) so với Otsu tự động.
+**Tham số khảo sát:** Sigma Gaussian (0.5, 0.8, 1.0, 1.5), ngưỡng hysteresis cố định (50/150, 100/200) so với Otsu tự động.
 
 ### 3.5 Kỹ thuật 4 — Phân đoạn ảnh (Chương 4)
 
@@ -155,7 +155,7 @@ Bước 3 — Non-Maximum Suppression (NMS): duyệt từng pixel, so sánh biê
 
 **Connected Components (Labeling):** Sau khi phát hiện cạnh bằng Canny, ảnh nhị phân thu được chứa các cạnh của nhiều đối tượng khác nhau (viền mí mắt, viền đồng tử, nếp nhăn, nhiễu). Thuật toán gắn nhãn thành phần liên thông được áp dụng để xác định vùng đồng tử. Các pixel cạnh liền kề theo 8-connected được gán cùng một nhãn. Sau khi gắn nhãn, thành phần có diện tích lớn nhất (largest blob) được coi là đồng tử — vì đồng tử thường tạo thành vòng cạnh kín có diện tích lớn nhất trong ROI mắt.
 
-Thuật toán gắn nhãn sử dụng Union-Find (Disjoint Set Union) với hai lượt quét (two-pass): lượt đầu gán nhãn tạm thời và ghi lại các cặp nhãn tương đương; lượt hai hợp nhất các nhãn tương đương và gán nhãn cuối cùng.
+Thuật toán gắn nhãn sử dụng Union-Find (Disjoint Set Union) trong một lượt quét (single-pass): duyệt từng pixel từ trái sang phải, trên xuống dưới, kiểm tra pixel lân cận đã được gán nhãn (trên và trái — tương ứng **4-connected**). Nếu pixel hiện tại liền kề với pixel đã có nhãn, gán cùng nhãn và cập nhật Union-Find. Sau lượt quét, chuẩn hóa lại các nhãn để đảm bảo liên tục từ 1.
 
 **Tham số khảo sát:** Margin ROI (5px, 10px, 15px), ngưỡng Canny cố định (50/150) so với Otsu tự động, kết nối (4-connected so với 8-connected).
 
@@ -171,9 +171,9 @@ Thuật toán gắn nhãn sử dụng Union-Find (Disjoint Set Union) với hai 
 
 Pitch index (chỉ số cúi/ngửa đầu) được ước lượng dựa trên tỷ lệ giữa chiều cao sống mũi (từ điểm 27 đến điểm 30) và chiều cao khuôn mặt (từ tâm mắt đến miệng): pitch_ratio = nose_height / face_height, sau đó convert sang pitch index = (pitch_ratio − 0.35) × 100. Giá trị này không phải góc độ thực (degrees) mà là chỉ số tỷ lệ, hiển thị với ký hiệu ° trên giao diện cho trực quan. Ngưỡng sử dụng là PITCH_THRESHOLD = 25 (riêng biệt với HEAD_TILT_THRESHOLD cho roll).
 
-**Cơ chế phát hiện và cảnh báo:** Hệ thống sử dụng kết hợp ngưỡng tĩnh và cơ chế đếm frame liên tiếp để phân loại. Buồn ngủ (Drowsiness) được phát hiện khi EAR trung bình < EAR_THRESHOLD (0.22) trong 15 frame liên tiếp, với dynamic threshold hỗ trợ: nếu EAR trung bình 10 frame gần nhất × 0.8 nhỏ hơn ngưỡng tĩnh, ngưỡng động được sử dụng thay thế. Chớp mắt (Blink) được phát hiện thông qua chuyển trạng thái mở → đóng → mở trong vòng BLINK_CONSEC_FRAMES (3 frame).
+**Cơ chế phát hiện và cảnh báo:** Hệ thống sử dụng kết hợp ngưỡng tĩnh và cơ chế đếm frame liên tiếp để phân loại. Buồn ngủ (Drowsiness) được phát hiện khi EAR trung bình < EAR_THRESHOLD (0.22) trong 15 frame liên tiếp, với dynamic threshold hỗ trợ: `min_threshold = ear_threshold × 0.6`, `dynamic_threshold = max(min_threshold, min(ear_threshold, recent_ear_avg × 0.8))`, trong đó `recent_ear_avg` là EAR trung bình 10 frame gần nhất. Cơ chế này tự động hạ ngưỡng khi người dùng có mắt naturally nhỏ hơn, nhưng không bao giờ thấp hơn 60% ngưỡng gốc. Chớp mắt (Blink) được phát hiện thông qua chuyển trạng thái mở → đóng → mở trong vòng BLINK_CONSEC_FRAMES (3 frame).
 
-Ngáp (Yawn) được phát hiện khi MAR > YAWN_THRESHOLD (0.30) trong 5 frame liên tiếp, có cooldown 4 giây giữa các lần phát hiện. Nghiêng đầu (Head Tilt) được phát hiện khi roll angle > HEAD_TILT_THRESHOLD (15°) **hoặc** pitch index > PITCH_THRESHOLD (25) so với giá trị tham chiếu ban đầu, trong 20 frame liên tiếp. Hai ngưỡng này riêng biệt: roll (nghiêng ngang) dùng ngưỡng 15°, pitch (cúi/ngửa) dùng ngưỡng 25. Mệt mỏi (Fatigue) được cảnh báo khi tần suất chớp mắt > 25 lần/phút hoặc tần suất ngáp > 3 lần/phút. Mất tập trung (No Face) được phát hiện khi không thấy khuôn mặt trong 20 frame liên tiếp.
+Ngáp (Yawn) được phát hiện khi MAR > YAWN_THRESHOLD (0.30) trong 5 frame liên tiếp, có cooldown 4 giây giữa các lần phát hiện. Nghiêng đầu (Head Tilt) được phát hiện khi roll angle > HEAD_TILT_THRESHOLD (15°) **hoặc** pitch index > PITCH_THRESHOLD (25) **so với giá trị tham chiếu**, trong 20 frame liên tiếp. Hệ thống tự động hiệu chỉnh giá trị tham chiếu trong 30 frame đầu tiên (CALIBRATION_FRAMES = 30): lấy median của roll và pitch trong giai đoạn này làm baseline. Sau calibration, giá trị tham chiếu tiếp tục được cập nhật chậm bằng exponential moving average (drift = 0.002) để thích nghi với thay đổi tư thế dần dần. Hai ngưỡng roll và pitch riêng biệt: roll (nghiêng ngang) dùng ngưỡng 15°, pitch (cúi/ngửa) dùng ngưỡng 25 (chỉ số tỷ lệ, không phải độ). Mệt mỏi (Fatigue) được cảnh báo khi tần suất chớp mắt > 25 lần/phút hoặc tần suất ngáp > 3 lần/phút. Mất tập trung (No Face) được phát hiện khi không thấy khuôn mặt trong 20 frame liên tiếp.
 
 Tất cả các cảnh báo được hiển thị dưới dạng overlay trên khung hình camera, sử dụng Pillow để render chữ Unicode tiếng Việt (font Arial). Âm thanh cảnh báo được phát dưới dạng loop (alert.wav) hoặc một lần (fatigue.mp3) tùy loại.
 
@@ -185,7 +185,7 @@ Tất cả các cảnh báo được hiển thị dưới dạng overlay trên k
 
 Thí nghiệm được thực hiện trên ứng dụng thời gian thực với luồng webcam (640×480, 30 FPS). Các trạng thái được kiểm tra gồm: tỉnh táo, nhắm mắt, ngáp, nghiêng đầu. Hệ thống ghi lại EAR, MAR, roll angle, pitch angle cho mỗi frame bằng MetricsCollector để đánh giá hiệu suất tại từng ngưỡng khác nhau.
 
-Các tham số được khảo sát gồm: EAR threshold (6 giá trị: 0.16, 0.18, 0.20, 0.22, 0.24, 0.26), MAR threshold (4 giá trị: 0.25, 0.30, 0.35, 0.40), Head Tilt threshold (3 giá trị: 10°, 15°, 20°), và Canny sigma (3 giá trị: 0.5, 1.0, 1.5). Mỗi khảo sát giữ cố định các tham số khác ở giá trị mặc định và chỉ thay đổi một tham số duy nhất.
+Các tham số được khảo sát gồm: EAR threshold (6 giá trị: 0.16, 0.18, 0.20, 0.22, 0.24, 0.26), MAR threshold (4 giá trị: 0.25, 0.30, 0.35, 0.40), Head Tilt threshold (3 giá trị: 10°, 15°, 20°), và Canny sigma (4 giá trị: 0.5, 0.8, 1.0, 1.5). Mỗi khảo sát giữ cố định các tham số khác ở giá trị mặc định và chỉ thay đổi một tham số duy nhất.
 
 *Lưu ý: Các giá trị precision, recall, F1-score trong Bảng 1–4 là giá trị xấp xỉ, được ước tính từ quan sát thực tế trên ứng dụng thời gian thực và dữ liệu mô phỏng, không phải kết quả từ đánh giá trên tập test chuẩn hóa với ground truth. Mục đích là thể hiện xu hướng tương đối giữa các ngưỡng, không phải so sánh tuyệt đối.*
 
@@ -214,17 +214,18 @@ Hệ thống hiển thị các bước xử lý trung gian trên giao diện: (a
 
 ### 4.3 Khảo sát tham số Canny Edge
 
-Thử nghiệm với 3 giá trị sigma (độ làm mờ Gaussian trước Canny) trên 100 frame mắt:
+Thử nghiệm với 4 giá trị sigma (độ làm mờ Gaussian trước Canny) trên 100 frame mắt:
 
 *Bảng 2: Kết quả khảo sát tham số sigma Canny*
 
 | Sigma | Biên độ gradient | Chất lượng cạnh | Nhận xét |
 |:-----:|:----------------:|----------------|----------|
 | 0.5 | 0–255 | Nhiều cạnh nhiễu, khó xác định đồng tử | Sigma nhỏ dẫn đến ít làm mờ, giữ lại nhiễu hạt từ cảm biến camera |
-| 1.0 | 0–180 | Cạnh mịn, viền mí và đồng tử rõ ràng | Cân bằng giữa khử nhiễu và giữ chi tiết cạnh |
+| **0.8** | 0–200 | Tương đối tốt, code mặc định | Sigma mặc định trong code, kết quả chấp nhận được |
+| 1.0 | 0–180 | Cạnh mịn, viền mí và đồng tử rõ ràng | Cân bằng giữa khử nhiễu và giữ chi tiết cạnh ✅ |
 | 1.5 | 0–120 | Cạnh bị mất chi tiết nhỏ, đồng tử không rõ | Sigma lớn dẫn đến làm mờ quá mức, mất các cạnh yếu |
 
-**Kết luận:** Sigma = 1.0 cho kết quả phát hiện cạnh tối ưu. Ở sigma = 0.5, nhiễu hạt tạo ra nhiều cạnh giả, gây khó khăn cho bước connected components. Ở sigma = 1.5, cạnh của đồng tử bị mất do làm mờ quá mức. Kết hợp sigma = 1.0 với Otsu threshold tự động cải thiện độ ổn định khi điều kiện ánh sáng thay đổi.
+**Kết luận:** Experiment cho thấy sigma = 1.0 cho kết quả phát hiện cạnh tối ưu nhất. Tuy nhiên, code hiện dùng sigma = 0.8 làm mặc định (manual_canny(sigma=0.8)) vì cho kết quả chấp nhận được với tốc độ xử lý nhanh hơn (kernel nhỏ hơn). Ở sigma = 0.5, nhiễu hạt tạo ra nhiều cạnh giả, gây khó khăn cho bước connected components. Ở sigma = 1.5, cạnh của đồng tử bị mất do làm mờ quá mức. Kết hợp sigma = 0.8 với Otsu threshold tự động cải thiện độ ổn định khi điều kiện ánh sáng thay đổi.
 
 ### 4.4 Khảo sát tham số MAR
 
@@ -268,7 +269,7 @@ Pipeline với tham số mặc định (EAR = 0.22, MAR = 0.30, HEAD_TILT = 15°
 | 1. EAR càng thấp → độ nhạy giảm, precision tăng | EAR = 0.16 bỏ sót nhiều, EAR = 0.26 nhiều dương tính giả | Đúng |
 | 2. MAR = 0.30 cho cân bằng precision-recall tốt nhất | 0.25 nhiều dương tính giả; 0.40 bỏ sót; 0.30 cân bằng nhất | Đúng |
 | 3. EAR_CONSEC_FRAMES = 15 cho F1-score tốt nhất | 5 frame gây nhầm nháy mắt thường thành buồn ngủ; 25 frame tăng độ trễ > 1 giây; 15 frame cân bằng | Đúng |
-| 4. HEAD_TILT = 15° cho kết quả phù hợp nhất | 10° quá nhạy; 20° bỏ sót; 15° cân bằng, ưu tiên an toàn | Đúng một phần |
+| 4. HEAD_TILT = 15° cho kết quả phù hợp nhất | 10° quá nhạy; 20° bỏ sót; 15° cân bằng, ưu tiên an toàn (với auto-calibration 30 frame) | Đúng một phần |
 | 5. Pipeline tổng thể F1 ≥ 0.85 và độ trễ < 1 giây | F1-score EAR ≈ 0.87, F1-score MAR ≈ 0.83, độ trễ phát hiện ~0.5 giây | Đúng |
 
 **Giả thuyết 3 — EAR_CONSEC_FRAMES = 15:** Đúng. Số frame liên tiếp quá thấp (5) khiến nháy mắt thường bị nhầm là buồn ngủ (dương tính giả cao). Số frame quá cao (25) làm tăng độ trễ phát hiện lên hơn 1 giây, không đáp ứng yêu cầu thời gian thực. 15 frame (~0.5 giây ở 30 FPS) là điểm cân bằng.
@@ -331,14 +332,14 @@ Kết quả quan sát khẳng định 4/5 giả thuyết là **đúng** và 1/5 
 
 | Chương | Kỹ thuật | Vai trò trong pipeline |
 |--------|----------|------------------------|
-| Ch.2 — Xử lý ảnh | Grayscale, CLAHE, lọc Gaussian | Tiền xử lý: giảm chiều dữ liệu, tăng cường tương phản, khử nhiễu |
-| Ch.3 — Phát hiện đặc trưng | Haar Cascade, DNN SSD, CNN MMOD, Canny edge (Sobel, NMS, hysteresis), dlib 68 landmarks, NMS | Phát hiện khuôn mặt (cascading 3 phương pháp), phát hiện cạnh mắt, định vị đặc trưng khuôn mặt |
-| Ch.4 — Phân đoạn ảnh | ROI segmentation, Otsu threshold, Connected Components labeling | Trích xuất vùng quan tâm, ngưỡng thích nghi, phân tích đồng tử |
-| Ch.5 — Nhận dạng | Threshold classification (EAR, MAR, head pose) | Phân loại trạng thái: nhắm mắt, ngáp, nghiêng đầu |
+| Ch.2 — Xử lý ảnh | Grayscale (thủ công), CLAHE (thủ công), lọc Gaussian | Tiền xử lý: giảm chiều dữ liệu, tăng cường tương phản, khử nhiễu — toàn bộ implement bằng numpy |
+| Ch.3 — Phát hiện đặc trưng | Haar Cascade, DNN SSD, CNN MMOD, Canny edge thủ công (Sobel, NMS, hysteresis), dlib 68 landmarks, NMS bounding box | Phát hiện khuôn mặt (cascading 3 phương pháp), phát hiện cạnh mắt, định vị đặc trưng khuôn mặt |
+| Ch.4 — Phân đoạn ảnh | ROI segmentation, Otsu threshold tự động, Connected Components labeling (Union-Find, 4-connected) | Trích xuất vùng quan tâm, ngưỡng thích nghi, phân tích đồng tử |
+| Ch.5 — Nhận dạng | Threshold classification (EAR, MAR, head pose + auto-calibration 30 frame) | Phân loại trạng thái: nhắm mắt, ngáp, nghiêng đầu |
 
 Kết quả quan sát khẳng định bộ tham số **EAR = 0.22, MAR = 0.30, HEAD_TILT = 15°, EAR_CONSEC_FRAMES = 15** cho hiệu quả phát hiện tốt nhất. Bốn phần năm giả thuyết được kiểm chứng là đúng, một phần năm được xác nhận đúng một phần. Hệ thống đáp ứng yêu cầu thời gian thực với độ trễ thấp và độ chính xác cao.
 
-Pipeline được triển khai bằng Python với hơn 2.400 dòng mã nguồn trong 21 file, kiến trúc MVC rõ ràng. Ứng dụng hoạt động ổn định trên thời gian thực với tốc độ xử lý đạt yêu cầu.
+Pipeline được triển khai bằng Python với hơn 2.450 dòng mã nguồn trong 21 file, kiến trúc MVC rõ ràng, trong đó hầu hết các bước xử lý ảnh cốt lõi được implement thủ công bằng numpy. Ứng dụng hoạt động ổn định trên thời gian thực với tốc độ xử lý đạt yêu cầu.
 
 ---
 
@@ -370,7 +371,7 @@ Pipeline được triển khai bằng Python với hơn 2.400 dòng mã nguồn 
 | NOTIFICATION_DURATION | 3.0 | Thời gian hiển thị thông báo (giây) |
 | CLAHE_CLIP_LIMIT | 2.0 | Hệ số giới hạn tương phản CLAHE |
 | CLAHE_TILE_GRID | 8×8 | Kích thước tile CLAHE (pixel) |
-| CANNY_SIGMA | 1.0 | Sigma làm mờ Gaussian trong Canny |
+| CANNY_SIGMA | 0.8 | Sigma làm mờ Gaussian trong Canny (default trong code) |
 | ROI_MARGIN | 10 | Margin mở rộng ROI (pixel) |
 
 ### Phụ lục B: Bảng phân công công việc

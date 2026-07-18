@@ -254,7 +254,6 @@ class DrowsinessDetectorApp(App):
                     status_text = 'CẢNH BÁO: Dấu hiệu mệt mỏi!'
                     self.status_label.text = status_text
                     self.alert_active = True
-                    self.background_color = [1, 0, 0, 1]
                     self.update_background_color()
                     logging.info(status_text)
                     self.start_fatigue_alert()
@@ -262,7 +261,6 @@ class DrowsinessDetectorApp(App):
                     status_text = 'CẢNH BÁO: Phát hiện buồn ngủ!'
                     self.status_label.text = status_text
                     self.alert_active = True
-                    self.background_color = [1, 0, 0, 1]
                     self.update_background_color()
                     logging.info(status_text)
                     self.start_alert()
@@ -270,7 +268,6 @@ class DrowsinessDetectorApp(App):
                     status_text = 'CẢNH BÁO: Tư thế đầu bất thường!'
                     self.status_label.text = status_text
                     self.alert_active = True
-                    self.background_color = [1, 0, 0, 1]
                     self.update_background_color()
                     logging.info(status_text)
                     self.start_alert()
@@ -385,7 +382,6 @@ class DrowsinessDetectorApp(App):
             self.alert_sound.loop = True
             self.alert_sound.volume = self.settings.alert_volume / 100.0
             self.alert_sound.play()
-        self.background_color = [1, 0, 0, 1]
         self.update_background_color()
         if self.alert_stop_timer:
             self.alert_stop_timer.cancel()
@@ -402,7 +398,6 @@ class DrowsinessDetectorApp(App):
             self.fatigue_sound.loop = False
             self.fatigue_sound.volume = self.settings.alert_volume / 100.0
             self.fatigue_sound.play()
-        self.background_color = [1, 0, 0, 1]
         self.update_background_color()
         if self.alert_stop_timer:
             self.alert_stop_timer.cancel()
