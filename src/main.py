@@ -24,11 +24,12 @@ def draw_metrics_overlay(frame, metrics, config):
     if not frame.flags['C_CONTIGUOUS']:
         frame = np.ascontiguousarray(frame)
     overlay_data = [
-        (f"EAR: {metrics['ear']:.2f}", (20, 30), (0, 255, 0) if metrics['ear'] >= config.EAR_THRESHOLD else (0, 0, 255)),
-        (f"MAR: {metrics['mar']:.2f}", (20, 55), (0, 255, 0) if metrics['mar'] <= config.YAWN_THRESHOLD else (0, 0, 255)),
-        (f"Roll: {metrics['roll_angle']:.1f} | Pitch: {metrics['pitch_angle']:.1f}", (20, 80), (255, 255, 255)),
-        (f"Blink: {metrics['blink_count']}  Yawn: {metrics['yawn_count']}", (20, 105), (255, 255, 255)),
-        (f"Face: {'Yes' if metrics['face_detected'] else 'No'}", (20, 130),
+        (f"Eye openness: {metrics['eye_openness']:.2f}", (20, 30),
+         (0, 255, 0) if metrics['eye_openness'] >= config.EYE_OPEN_THRESHOLD else (0, 0, 255)),
+        (f"Mouth openness: {metrics['mouth_openness']:.2f}", (20, 55),
+         (0, 255, 0) if metrics['mouth_openness'] <= config.MOUTH_OPEN_THRESHOLD else (0, 0, 255)),
+        (f"Blink: {metrics['blink_count']}  Yawn: {metrics['yawn_count']}", (20, 80), (255, 255, 255)),
+        (f"Face: {'Yes' if metrics['face_detected'] else 'No'}", (20, 105),
          (0, 255, 0) if metrics['face_detected'] else (0, 0, 255)),
     ]
     for text, pos, color in overlay_data:
@@ -54,6 +55,7 @@ def show_pipeline_windows(frame, metrics, detector):
 def run_detection(save_pipeline=False):
     detector = DrowsinessDetector(save_pipeline=save_pipeline)
     config = Config()
+    config.load_calibration()
 
     try:
         detector.start_camera()
@@ -103,14 +105,14 @@ def run_calibration():
     duration = config.CALIBRATION_DURATION
 
     while time.time() - start_time < duration:
-        frame, ear = detector.process_calibration_frame()
+        frame, eye_openness = detector.process_calibration_frame()
         if frame is None:
             continue
 
         remaining = duration - (time.time() - start_time)
         cv2.putText(frame, f"Calibration: {remaining:.0f}s", (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"EAR: {ear:.2f}", (20, 60),
+        cv2.putText(frame, f"Eye openness: {eye_openness:.2f}", (20, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.imshow("Calibration", frame)
 
@@ -119,7 +121,7 @@ def run_calibration():
 
     success, new_threshold = detector.finalize_calibration()
     if success:
-        logger.info(f"Calibration complete. New EAR threshold: {new_threshold:.3f}")
+        logger.info(f"Calibration complete. New eye threshold: {new_threshold:.3f}")
     else:
         logger.warning("Calibration failed, using default threshold")
 

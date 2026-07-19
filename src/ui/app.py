@@ -32,16 +32,14 @@ class DrowsinessDetectorApp(App):
         self.image_dir = self.app_config.IMAGE_DIR
         self.alert_sound_file = self.app_config.ALERT_SOUND_FILE
         self.fatigue_sound_file = self.app_config.FATIGUE_SOUND_FILE
-        self.ear_threshold = self.app_config.EAR_THRESHOLD
+        self.eye_open_threshold = self.detector.eye_open_threshold
         self.camera_width = self.app_config.CAMERA_WIDTH
         self.camera_height = self.app_config.CAMERA_HEIGHT
         self.camera_fps = self.app_config.CAMERA_FPS
         self.initialize_app()
         self.last_metrics = {
-            'ear': None,
-            'mar': None,
-            'roll_angle': None,
-            'pitch_angle': None,
+            'eye_openness': None,
+            'mouth_openness': None,
             'blink_count': 0,
             'yawn_count': 0
         }
@@ -95,22 +93,25 @@ class DrowsinessDetectorApp(App):
         self._result_queue = queue.Queue(maxsize=1)
         self._latest_frame = None
         self._frame_lock = threading.Lock()
+        self._worker_lock = threading.RLock()
 
     def _get_main_screen(self):
         if self._main_screen_cache is None and self.screen_manager is not None:
             self._main_screen_cache = self.screen_manager.get_screen('main')
         return self._main_screen_cache
 
-    def _update_main_screen_metrics(self, ear_override=None):
+    def _update_main_screen_metrics(self, eye_override=None):
         main_screen = self._get_main_screen()
         if main_screen is None:
             return
-        ear = ear_override if ear_override is not None else self.last_metrics['ear']
+        eye_openness = (
+            eye_override
+            if eye_override is not None
+            else self.last_metrics['eye_openness']
+        )
         main_screen.update_metrics(
-            ear,
-            self.last_metrics['mar'],
-            self.last_metrics['roll_angle'],
-            self.last_metrics['pitch_angle'],
+            eye_openness,
+            self.last_metrics['mouth_openness'],
             self.last_metrics['blink_count'],
             self.last_metrics['yawn_count']
         )
@@ -167,19 +168,26 @@ class DrowsinessDetectorApp(App):
         else:
             self._update_main_screen_metrics()
 
-    def _capture_loop(self):
-        while not self._stop_event.is_set():
+    def _capture_loop(self, stop_event):
+        while not stop_event.is_set():
             try:
-                if not self.detector.camera or not self.detector.camera.isOpened():
+                ret, frame = self.detector.read_camera_frame()
+                if not ret or frame is None:
                     try:
                         self.detector.start_camera()
                     except Exception as e:
                         logger.error(f"Reinit camera failed: {e}")
-                        self._stop_event.wait(1.0)
+                        stop_event.wait(1.0)
                         continue
-                ret, frame = self.detector.camera.read()
+                    ret, frame = self.detector.read_camera_frame()
                 if ret and frame is not None:
-                    frame = cv2.resize(frame, (self.detector.config.CAMERA_WIDTH, self.detector.config.CAMERA_HEIGHT))
+                    frame = cv2.resize(
+                        frame,
+                        (
+                            self.detector.config.CAMERA_WIDTH,
+                            self.detector.config.CAMERA_HEIGHT,
+                        ),
+                    )
                     if self._frame_queue.full():
                         try:
                             self._frame_queue.get_nowait()
@@ -187,13 +195,13 @@ class DrowsinessDetectorApp(App):
                             pass
                     self._frame_queue.put_nowait(frame)
                 else:
-                    self._stop_event.wait(0.05)
+                    stop_event.wait(0.05)
             except Exception as e:
-                logger.error(f"Capture error: {e}")
-                self._stop_event.wait(0.1)
+                logger.exception("Capture error: %s", e)
+                stop_event.wait(0.1)
 
-    def _processing_loop(self):
-        while not self._stop_event.is_set():
+    def _processing_loop(self, stop_event):
+        while not stop_event.is_set():
             try:
                 try:
                     frame = self._frame_queue.get(timeout=0.5)
@@ -208,7 +216,33 @@ class DrowsinessDetectorApp(App):
                         pass
                 self._result_queue.put_nowait(result)
             except Exception as e:
-                logger.error(f"Processing error (thread): {e}")
+                logger.exception("Processing error (thread): %s", e)
+                stop_event.wait(0.05)
+
+    def _stop_worker_threads(self, join_timeout=2.0):
+        with self._worker_lock:
+            stop_event = self._stop_event
+            capture_thread = self._capture_thread
+            processing_thread = self._processing_thread
+            stop_event.set()
+
+        current_thread = threading.current_thread()
+        for worker in (capture_thread, processing_thread):
+            if worker and worker is not current_thread and worker.is_alive():
+                worker.join(timeout=join_timeout)
+
+        capture_stopped = not capture_thread or not capture_thread.is_alive()
+        processing_stopped = (
+            not processing_thread or not processing_thread.is_alive()
+        )
+        with self._worker_lock:
+            if self._capture_thread is capture_thread and capture_stopped:
+                self._capture_thread = None
+            if self._processing_thread is processing_thread and processing_stopped:
+                self._processing_thread = None
+        if not capture_stopped or not processing_stopped:
+            logger.error("Worker threads did not stop within %.1f seconds", join_timeout)
+        return capture_stopped and processing_stopped
 
     def _consume_frame_result(self):
         try:
@@ -220,19 +254,19 @@ class DrowsinessDetectorApp(App):
     def _apply_frame_result(self, frame, alert_detected, metrics):
         try:
             face_detected = metrics.get('face_detected', False)
-            ear = metrics.get('ear', self.last_metrics['ear'])
-            mar = metrics.get('mar', self.last_metrics['mar'])
-            roll_angle = metrics.get('roll_angle', self.last_metrics['roll_angle'])
-            pitch_angle = metrics.get('pitch_angle', self.last_metrics['pitch_angle'])
+            eye_openness = metrics.get(
+                'eye_openness', self.last_metrics['eye_openness']
+            )
+            mouth_openness = metrics.get(
+                'mouth_openness', self.last_metrics['mouth_openness']
+            )
             blink_count = metrics.get('blink_count', self.detector.blink_total)
             yawn_count = metrics.get('yawn_count', self.detector.yawn_total)
 
             if frame is not None:
                 if face_detected:
-                    self.last_metrics['ear'] = ear
-                    self.last_metrics['mar'] = mar
-                    self.last_metrics['roll_angle'] = roll_angle
-                    self.last_metrics['pitch_angle'] = pitch_angle
+                    self.last_metrics['eye_openness'] = eye_openness
+                    self.last_metrics['mouth_openness'] = mouth_openness
                 # Blink and yawn counts are cumulative/independent of immediate face detection
                 self.last_metrics['blink_count'] = blink_count
                 self.last_metrics['yawn_count'] = yawn_count
@@ -266,8 +300,8 @@ class DrowsinessDetectorApp(App):
                     self.update_background_color()
                     logging.info(status_text)
                     self.start_alert()
-                elif metrics.get('head_tilt_detected', False):
-                    status_text = 'CẢNH BÁO: Tư thế đầu bất thường!'
+                elif metrics.get('distraction_detected', False):
+                    status_text = 'CẢNH BÁO: Không phát hiện khuôn mặt!'
                     self.status_label.text = status_text
                     self.alert_active = True
                     self.background_color = [1, 0, 0, 1]
@@ -294,29 +328,46 @@ class DrowsinessDetectorApp(App):
             self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
             logging.error("Không thể bắt đầu giám sát: Camera chưa khởi tạo")
             return
-        self.detector.reset_head_reference()
-        self.is_monitoring = True
+        with self._worker_lock:
+            workers_running = any(
+                worker and worker.is_alive()
+                for worker in (self._capture_thread, self._processing_thread)
+            )
+            if self.is_monitoring or workers_running:
+                logging.info("Giám sát đã chạy; bỏ qua yêu cầu bắt đầu lặp")
+                return
+            stop_event = threading.Event()
+            self._stop_event = stop_event
+            self._capture_thread = threading.Thread(
+                target=self._capture_loop,
+                args=(stop_event,),
+                daemon=True,
+            )
+            self._processing_thread = threading.Thread(
+                target=self._processing_loop,
+                args=(stop_event,),
+                daemon=True,
+            )
+            capture_thread = self._capture_thread
+            processing_thread = self._processing_thread
+            self.is_monitoring = True
+
         self.status_label.text = 'Trạng thái: Đang giám sát'
         self.background_color = [0, 0, 0, 1]
         self.update_background_color()
-        self._stop_event.clear()
         for q in (self._frame_queue, self._result_queue):
             while not q.empty():
                 try:
                     q.get_nowait()
                 except queue.Empty:
                     break
-        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
-        self._capture_thread.start()
-        self._processing_thread.start()
+        capture_thread.start()
+        processing_thread.start()
         logging.info("Bắt đầu giám sát")
 
     def stop_monitoring(self, instance):
         self.is_monitoring = False
-        self._stop_event.set()
-        self._capture_thread = None
-        self._processing_thread = None
+        workers_stopped = self._stop_worker_threads()
         self.alert_active = False
         self.status_label.text = 'Trạng thái: Đã dừng'
         self.image.texture = None
@@ -334,13 +385,17 @@ class DrowsinessDetectorApp(App):
         self.update_background_color()
         self._update_main_screen_metrics()
         logging.info("Dừng giám sát")
+        return workers_stopped
 
     def calibrate(self, instance):
         if not self.camera_initialized:
             self.status_label.text = 'Lỗi: Camera chưa khởi tạo'
             logging.error("Không thể hiệu chỉnh: Camera chưa khởi tạo")
             return
-        self.stop_monitoring(instance)
+        if not self.stop_monitoring(instance):
+            self.status_label.text = 'Lỗi: Luồng xử lý cũ chưa dừng'
+            logging.error("Không thể hiệu chỉnh khi worker cũ vẫn đang chạy")
+            return
         self.status_label.text = 'Trạng thái: Đang hiệu chỉnh...'
         self.background_color = [0, 0, 0, 1]
         self.update_background_color()
@@ -356,6 +411,13 @@ class DrowsinessDetectorApp(App):
             success, new_threshold = self.detector.finalize_calibration()
             self.calibration_event.cancel()
             self.calibration_event = None
+            if success:
+                self.eye_open_threshold = new_threshold
+                main_screen = self._get_main_screen()
+                if main_screen is not None:
+                    main_screen.metrics_widgets['eye_openness']['bar'].threshold = (
+                        new_threshold
+                    )
             self.status_label.text = f'Trạng thái: Hiệu chỉnh hoàn tất ( Ngưỡng mắt mới: {new_threshold:.3f})' if success else 'Trạng thái: Hiệu chỉnh thất bại'
             logging.info(
                 f"Hiệu chỉnh {'hoàn tất' if success else 'thất bại'}. Ngưỡng mắt mới: {new_threshold:.3f}" if success else "Hiệu chỉnh thất bại")
@@ -364,15 +426,18 @@ class DrowsinessDetectorApp(App):
             self.update_background_color()
             self._update_main_screen_metrics()
             return
-        frame, ear = self.detector.process_calibration_frame()
+        frame, eye_openness = self.detector.process_calibration_frame()
         if frame is not None:
             if not hasattr(self, '_texture') or self._texture is None or self._texture.size != (frame.shape[1], frame.shape[0]):
                 self._texture = Texture.create(size=(frame.shape[1], frame.shape[0]), colorfmt='bgr')
             self._texture.blit_buffer(cv2.flip(frame, 0).tobytes(), colorfmt='bgr', bufferfmt='ubyte')
             self.image.texture = self._texture
             remaining = int(duration - elapsed)
-            self.status_label.text = f'Đang hiệu chỉnh... {remaining}s (Ngưỡng mắt: {ear:.2f})'
-            self._update_main_screen_metrics(ear_override=ear)
+            self.status_label.text = (
+                f'Đang hiệu chỉnh... {remaining}s '
+                f'(Độ mở mắt: {eye_openness:.2f})'
+            )
+            self._update_main_screen_metrics(eye_override=eye_openness)
 
     def start_alert(self):
         logging.info("Bắt đầu phát âm thanh cảnh báo")
@@ -422,12 +487,8 @@ class DrowsinessDetectorApp(App):
 
     def on_stop(self):
         logging.info("Dọn dẹp tài nguyên")
-        self._stop_event.set()
         self.is_monitoring = False
-        if self._capture_thread and self._capture_thread.is_alive():
-            self._capture_thread.join(timeout=2)
-        if self._processing_thread and self._processing_thread.is_alive():
-            self._processing_thread.join(timeout=2)
+        self._stop_worker_threads()
         if self.alert_stop_timer:
             self.alert_stop_timer.cancel()
         if self.alert_sound:

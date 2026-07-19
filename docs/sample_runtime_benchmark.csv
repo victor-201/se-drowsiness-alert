@@ -1,0 +1,3 @@
+method,batch_1_ms,batch_2_ms,batch_3_ms,batch_4_ms,batch_5_ms,median_ms_per_face,equivalent_fps
+landmark_68,0.740,0.700,0.702,0.714,0.788,0.714,1400.64
+edge_feature,17.993,16.851,16.735,17.108,17.089,17.089,58.52

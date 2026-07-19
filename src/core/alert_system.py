@@ -76,13 +76,6 @@ class AlertSystem:
         _add_weighted(overlay, 0.3, frame, 0.7, 0, frame)
         return self.center_text(frame, "KHÔNG PHÁT HIỆN TÀI XẾ!", font_size=30, color=self.config.ALERT_COLOR)
 
-    def render_head_tilt_alert(self, frame):
-        overlay = frame.copy()
-        alpha = 0.4 + 0.2 * np.sin(time.time() * 6)
-        cv2.rectangle(overlay, (0, 0), (frame.shape[1], frame.shape[0]), (0, 165, 255), -1)
-        _add_weighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-        return self.center_text(frame, "CẢNH BÁO TƯ THẾ ĐẦU!", font_size=35, color=(255, 255, 255))
-
     def render_fatigue_alert(self, frame):
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (frame.shape[1], 50), (0, 0, 255), -1)

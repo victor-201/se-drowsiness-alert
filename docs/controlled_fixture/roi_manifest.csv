@@ -1,0 +1,13 @@
+sample,image,x1,y1,x2,y2,eye_closed,yawn
+b165_open_normal,b165_open_normal.png,0,0,240,240,0,0
+b165_open_yawn,b165_open_yawn.png,0,0,240,240,0,1
+b165_closed_normal,b165_closed_normal.png,0,0,240,240,1,0
+b165_closed_yawn,b165_closed_yawn.png,0,0,240,240,1,1
+b210_open_normal,b210_open_normal.png,0,0,240,240,0,0
+b210_open_yawn,b210_open_yawn.png,0,0,240,240,0,1
+b210_closed_normal,b210_closed_normal.png,0,0,240,240,1,0
+b210_closed_yawn,b210_closed_yawn.png,0,0,240,240,1,1
+b235_open_normal,b235_open_normal.png,0,0,240,240,0,0
+b235_open_yawn,b235_open_yawn.png,0,0,240,240,0,1
+b235_closed_normal,b235_closed_normal.png,0,0,240,240,1,0
+b235_closed_yawn,b235_closed_yawn.png,0,0,240,240,1,1

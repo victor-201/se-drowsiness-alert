@@ -1,5 +1,7 @@
 # BÁO CÁO BÀI TẬP LỚN
 
+> **Lưu ý ngày 19/07/2026:** Tài liệu này mô tả pipeline landmark cũ và được giữ làm baseline lịch sử. Runtime hiện tại đã loại bỏ dlib/68 landmarks/head pose, chỉ kiểm tra nhắm mắt và ngáp bằng Canny, phân đoạn vùng tối và điểm Shi-Tomasi. Xem báo cáo tái đánh giá và benchmark ROI có kiểm soát tại `docs/edge_feature_reassessment.md`. Các F1 trong tài liệu cũ là số ước lượng, không phải kết quả benchmark trên cùng tập ground truth.
+
 ## Ứng Dụng Cảnh Báo Phát Hiện Buồn Ngủ Lái Xe Bằng Thị Giác Máy Tính
 
 **Môn học:** Xử Lý Ảnh và Thị Giác Máy Tính — 121036  

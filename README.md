@@ -1,121 +1,167 @@
-# Ứng Dụng Cảnh Báo Phát Hiện Buồn Ngủ Lái Xe
+# Ứng Dụng Cảnh Báo Buồn Ngủ Lái Xe
 
-Đồ án môn **Xử Lý Ảnh và Thị Giác Máy Tính** — Trường Đại học Giao thông Vận tải TP. Hồ Chí Minh.
+Đồ án môn **Xử Lý Ảnh và Thị Giác Máy Tính** - Trường Đại học Giao thông Vận tải TP. Hồ Chí Minh.
 
-## Giới thiệu
+## Phạm vi hiện tại
 
-Ứng dụng giám sát khuôn mặt tài xế qua webcam theo thời gian thực, phát hiện các dấu hiệu buồn ngủ (nhắm mắt lâu, ngáp, nghiêng đầu) và phát cảnh báo. Pipeline xử lý ảnh kết hợp các kỹ thuật từ Chương 2–5 của chương trình học.
+Ứng dụng giám sát khuôn mặt tài xế qua webcam và kiểm tra hai trạng thái:
 
-## Kỹ thuật CV sử dụng
+- Nhắm mắt kéo dài.
+- Ngáp.
 
-| Chương | Kỹ thuật | Chi tiết |
-|--------|----------|----------|
-| Ch. 2 | Xử lý ảnh | Chuyển grayscale, CLAHE cân bằng histogram thích ứng |
-| Ch. 3 | Phát hiện đặc trưng | Haar Cascade (Viola-Jones) phát hiện khuôn mặt, dlib shape predictor 68 landmarks, Canny edge detection trên ROI mắt |
-| Ch. 4 | Phân đoạn ảnh | Trích xuất ROI mắt và miệng dựa trên landmark, phân đoạn ngưỡng |
-| Ch. 5 | Nhận dạng | Phân loại threshold-based: EAR (Eye Aspect Ratio), MAR (Mouth Aspect Ratio), head pose |
+Pipeline runtime không còn dùng `dlib` hoặc mô hình 68 facial landmarks. Head pose và cảnh báo nghiêng đầu đã được loại bỏ khỏi luồng xử lý.
 
-## Yêu cầu cài đặt
+## Pipeline
 
-- Python 3.8–3.11
-- Webcam
+1. Chuyển frame sang grayscale và tăng tương phản bằng CLAHE.
+2. Tìm bounding box khuôn mặt bằng Haar Cascade và OpenCV DNN SSD, gộp bằng NMS.
+3. Xác định vùng mắt bằng Haar-like eye candidates; nếu không đủ ứng viên thì dùng ROI theo tỷ lệ khuôn mặt.
+4. Xác định ROI miệng theo tỷ lệ khuôn mặt.
+5. Trên từng ROI: Gaussian blur, Canny tự động, Otsu inverse threshold, morphology và connected components.
+6. Lấy điểm đặc trưng Shi-Tomasi bằng `cv2.goodFeaturesToTrack`.
+7. Kết hợp độ cao vùng tối, độ phân tán cạnh và độ phân tán điểm đặc trưng thành:
+   - `eye_openness`: thấp hơn ngưỡng nghĩa là mắt nhắm.
+   - `mouth_openness`: cao hơn ngưỡng nghĩa là miệng mở/ngáp.
+8. Dùng số frame liên tiếp và tần suất theo phút để phát cảnh báo.
 
-## Hướng dẫn cài đặt và chạy
+## Cài đặt
+
+Yêu cầu Python 3.8-3.11 và webcam.
 
 ```bash
 python -m venv venv
-venv\Scripts\activate    # Windows
-# source venv/bin/activate  # Linux/Mac
+source venv/bin/activate       # Linux/macOS
+# venv\Scripts\activate       # Windows
 pip install -r requirements.txt
-python src/main.py
 ```
 
-Tài nguyên model `shape_predictor_68_face_landmarks.dat` (~99MB) sẽ được tự động tải khi chạy lần đầu nếu chưa có trong thư mục `data/`.
+Không cần tải `shape_predictor_68_face_landmarks.dat`. Hai model dlib cũ đã được xóa, giảm khoảng 95.77 MiB dữ liệu model trong repository.
 
-## Usage
-
-### Các chế độ chạy
+## Chạy ứng dụng
 
 ```bash
-# Giao diện Desktop Kivy (mặc định — đầy đủ chức năng)
+# Giao diện Kivy
 python src/main.py
-hoặc
+# hoặc
 python run.py
 
-# Giao diện OpenCV (chế độ xem pipeline)
+# Giao diện OpenCV
 python src/main.py --opencv
 
-# Bật lưu ảnh pipeline (chỉ với --opencv)
+# Lưu ảnh từng bước của pipeline
 python src/main.py --opencv --save-pipeline
 
-# Hiệu chỉnh ngưỡng EAR
+# Hiệu chỉnh ngưỡng độ mở mắt trong 5 giây
 python src/main.py --calibrate
 ```
 
-### Phím tắt (OpenCV mode)
+Phím trong OpenCV mode:
 
 | Phím | Chức năng |
-|------|-----------|
+|---|---|
 | `q` | Thoát |
-| `p` | Bật/tắt lưu pipeline stages (ảnh trung gian) |
+| `p` | Bật/tắt lưu ảnh pipeline |
 
-### Jupyter notebook
-
-Mở notebook thí nghiệm và khảo sát tham số:
+## Test
 
 ```bash
-jupyter notebook notebooks/experiments.ipynb
+python -m unittest discover -s tests -v
 ```
 
-## Cấu trúc thư mục
+Test bao gồm:
 
-```
-se-drowsiness-alert/
-├── assets/                   # Âm thanh, hình ảnh, font chữ
-│   ├── fonts/
-│   ├── images/
-│   └── sounds/
-├── data/                     # Model dlib, file hiệu chỉnh, cài đặt
-├── notebooks/                # Jupyter notebook thí nghiệm + ảnh test
-│   ├── experiments.ipynb
-│   └── generate_test_face.py
-├── src/
-│   ├── __init__.py
-│   ├── main.py               # Điểm vào ứng dụng (Kivy/OpenCV/Calibrate)
-│   ├── configs/              # Cấu hình hệ thống
-│   │   ├── config.py         #   Config — tham số mặc định
-│   │   └── settings.py       #   Settings — cài đặt người dùng
-│   ├── core/                 # Logic phát hiện và xử lý
-│   │   ├── detector.py       #   Pipeline chính + Haar Cascade face detection
-│   │   ├── facial_analyzer.py#   EAR, MAR, CLAHE, Canny, head pose
-│   │   ├── alert_system.py   #   Cảnh báo overlay + âm thanh
-│   │   └── model_manager.py  #   Quản lý model dlib (tự động tải)
-│   ├── evaluation/           # Đánh giá định lượng
-│   │   └── metrics.py
-│   ├── exceptions/           # Exception classes
-│   │   └── app_exceptions.py
-│   └── ui/                   # Giao diện Desktop Kivy
-│       ├── app.py            #   App chính (Kivy)
-│       ├── widgets.py        #   Widget dùng chung (IconButton)
-│       ├── styles.py         #   KV style strings
-│       └── screens/
-│           ├── main_screen.py#   Màn hình chính
-│           └── settings_screen.py # Màn hình cài đặt
-├── pipeline_output/          # Ảnh pipeline trung gian (khi bật --save-pipeline)
-├── requirements.txt
-└── README.md
+- Tách mắt mở/nhắm ở ba mức sáng tổng hợp.
+- Tách miệng bình thường/ngáp ở ba mức sáng tổng hợp.
+- Regression trên hai khuôn mặt thật trong `notebooks/test.png`.
+- Bộ đếm frame liên tiếp cho cảnh báo nhắm mắt và xác nhận một lần ngáp.
+- Kiểm tra confusion matrix của công cụ đánh giá.
+- Test tích hợp benchmark ROI, baseline landmark và ba file kết quả.
+- Chuẩn hóa frame/ROI ngoài biên và bỏ qua dữ liệu không hợp lệ.
+- Tuần tự hóa nhiều thread dùng chung detector để bảo vệ Haar, DNN và eye cascade.
+
+## So sánh với landmark cũ
+
+### Đánh giá video
+
+Chuẩn bị CSV ground truth `frame,eye_closed,yawn` và CSV landmark cũ
+`frame,eye_closed_pred,yawn_pred`, hoặc raw `frame,ear,mar`.
+
+Ví dụ định dạng nằm tại:
+
+- `docs/evaluation_labels.example.csv`
+- `docs/landmark_baseline.example.csv`
+
+Chạy:
+
+```bash
+python -m src.evaluation.metrics \
+  --video path/to/test.mp4 \
+  --labels path/to/labels.csv \
+  --landmark-baseline path/to/landmark_predictions.csv \
+  --output evaluation_results
 ```
 
-## Cấu hình
+### Đánh giá ROI đã gán nhãn
 
-Các tham số chính trong `src/configs/config.py`:
-- `EAR_THRESHOLD`: Ngưỡng phát hiện mắt nhắm (mặc định 0.22)
-- `EAR_CONSEC_FRAMES`: Số frame liên tiếp mắt nhắm để báo động (15)
-- `YAWN_THRESHOLD`: Ngưỡng phát hiện ngáp (0.30)
-- `YAWN_CONSEC_FRAMES`: Số frame liên tiếp ngáp để xác nhận (5)
-- `HEAD_TILT_THRESHOLD`: Ngưỡng góc nghiêng đầu (15 độ)
-- `HEAD_TILT_FRAMES`: Số frame liên tiếp nghiêng đầu để báo động (20)
-- `BLINK_PER_MINUTE_THRESHOLD`: Tần suất nháy mắt/phút để cảnh báo mệt mỏi (25)
-- `YAWN_PER_MINUTE_THRESHOLD`: Tần suất ngáp/phút để cảnh báo mệt mỏi (3)
-- `NO_FACE_ALERT_FRAMES`: Số frame không thấy mặt để báo mất tập trung (20)
-- `CALIBRATION_DURATION`: Thời gian hiệu chỉnh (giây, mặc định 5)
+Chế độ này bỏ qua face detector và phân tích trực tiếp bounding box đã biết. Manifest
+có các cột `sample,image,x1,y1,x2,y2,eye_closed,yawn`; baseline landmark dùng
+`sample` thay cho `frame`.
+
+```bash
+python -m src.evaluation.metrics \
+  --roi-manifest docs/controlled_fixture/roi_manifest.csv \
+  --landmark-baseline docs/controlled_landmark_baseline.csv \
+  --output evaluation_results
+```
+
+Fixture đi kèm có 12 mẫu có kiểm soát: bốn tổ hợp mắt mở/nhắm và miệng
+bình thường/ngáp ở ba mức sáng. Đây là test chức năng tổng hợp, không phải bằng
+chứng về độ chính xác trên người thật.
+
+Kết quả:
+
+- `evaluation_results/predictions.csv`
+- `evaluation_results/comparison.json`
+- `evaluation_results/comparison.md`
+
+Công cụ tính riêng accuracy, precision, recall, specificity, F1 và FPR cho nhắm mắt/ngáp. Báo cáo cũng ghi coverage mắt, miệng, feature hợp lệ và thời gian xử lý; chế độ video ghi thêm face-detection coverage. Baseline phải phủ đủ toàn bộ frame/mẫu được đánh giá để bảo đảm hai phương pháp dùng cùng tập nhãn. Recall/F1 được để `n/a` khi tập nhãn không có mẫu dương tính.
+
+Xem kết quả tái đánh giá hiện tại tại `docs/edge_feature_reassessment.md`.
+
+## Cấu hình chính
+
+| Tham số | Mặc định | Ý nghĩa |
+|---|---:|---|
+| `EYE_OPEN_THRESHOLD` | 0.20 | Nhỏ hơn ngưỡng được xem là mắt nhắm |
+| `EYE_CLOSED_CONSEC_FRAMES` | 15 | Frame nhắm mắt liên tiếp để cảnh báo |
+| `MOUTH_OPEN_THRESHOLD` | 0.35 | Lớn hơn ngưỡng được xem là miệng mở |
+| `YAWN_CONSEC_FRAMES` | 5 | Frame miệng mở liên tiếp để tính một lần ngáp |
+| `FEATURE_MIN_FACE_SIZE` | 80 | Kích thước mặt tối thiểu để phân tích trạng thái |
+| `EYE_FEATURE_MIN_CONFIDENCE` | 0.25 | Confidence tối thiểu của vùng mắt |
+| `MOUTH_FEATURE_MIN_CONFIDENCE` | 0.25 | Confidence tối thiểu của vùng miệng |
+| `BLINK_PER_MINUTE_THRESHOLD` | 25 | Tần suất chớp mắt cảnh báo mệt mỏi |
+| `YAWN_PER_MINUTE_THRESHOLD` | 3 | Tần suất ngáp cảnh báo mệt mỏi |
+
+## Cấu trúc liên quan
+
+```text
+src/
+  core/
+    detector.py          Pipeline camera, trạng thái và cảnh báo
+    facial_analyzer.py   Canny, Otsu, vùng tối, Shi-Tomasi
+    feature_classifier.py Logic validity/ngưỡng dùng chung
+    model_manager.py     Chỉ quản lý model OpenCV DNN face detector
+  evaluation/
+    controlled_fixture.py Sinh fixture chức năng có kiểm soát
+    metrics.py           Benchmark với ground truth và baseline landmark
+  ui/
+    app.py
+    screens/main_screen.py
+tests/
+  test_feature_detection.py
+  test_evaluation_metrics.py
+docs/
+  edge_feature_reassessment.md
+```
+
+`notebooks/experiments.ipynb`, `docs/report.md` và `docs/report.docx` chứa thí nghiệm/báo cáo của pipeline landmark cũ và chỉ được giữ làm baseline lịch sử.

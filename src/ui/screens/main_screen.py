@@ -60,9 +60,9 @@ class MainScreen(Screen):
         # Khởi tạo màn hình chính
         self.app = app_instance
         self.metrics_widgets = {
-            'ear': {
+            'eye_openness': {
                 'label': Label(
-                    text='Cỡ mắt: --',
+                    text='Độ mở mắt: --',
                     size_hint=(1, 0.1),
                     font_size='20sp',
                     halign='left',
@@ -70,12 +70,12 @@ class MainScreen(Screen):
                     text_size=(None, None),
                     padding=(10, 0)
                 ),
-                'bar': StatusBar(value=0.0, max_value=0.4, threshold=self.app.ear_threshold, reverse_threshold=True,
+                'bar': StatusBar(value=0.0, max_value=1.0, threshold=self.app.eye_open_threshold, reverse_threshold=True,
                                  size_hint=(1, 0.1), bar_length=150)
             },
-            'mar': {
+            'mouth_openness': {
                 'label': Label(
-                    text='Cỡ miệng: --',
+                    text='Độ mở miệng: --',
                     size_hint=(1, 0.1),
                     font_size='20sp',
                     halign='left',
@@ -83,31 +83,7 @@ class MainScreen(Screen):
                     text_size=(None, None),
                     padding=(10, 0)
                 ),
-                'bar': StatusBar(value=0.0, max_value=1.0, threshold=self.app.detector.config.YAWN_THRESHOLD, size_hint=(1, 0.1), bar_length=150)
-            },
-            'roll_angle': {
-                'label': Label(
-                    text='Góc nghiêng: --',
-                    size_hint=(1, 0.1),
-                    font_size='20sp',
-                    halign='left',
-                    valign='middle',
-                    text_size=(None, None),
-                    padding=(10, 0)
-                ),
-                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.roll_threshold, size_hint=(1, 0.1), bar_length=150)
-            },
-            'pitch_angle': {
-                'label': Label(
-                    text='Góc cúi: --',
-                    size_hint=(1, 0.1),
-                    font_size='20sp',
-                    halign='left',
-                    valign='middle',
-                    text_size=(None, None),
-                    padding=(10, 0)
-                ),
-                'bar': StatusBar(value=0.0, max_value=45.0, threshold=self.app.detector.pitch_threshold, size_hint=(1, 0.1), bar_length=150)
+                'bar': StatusBar(value=0.0, max_value=1.0, threshold=self.app.detector.config.MOUTH_OPEN_THRESHOLD, size_hint=(1, 0.1), bar_length=150)
             },
             'blink_count': {
                 'label': Label(
@@ -206,8 +182,8 @@ class MainScreen(Screen):
         content_layout = BoxLayout(orientation='horizontal', size_hint=(1, 0.7), spacing=10)
         metrics_layout = BoxLayout(orientation='vertical', size_hint=(0.3, 1), spacing=5)
         
-        # Thêm các widget cho EAR, MAR, roll_angle, pitch_angle
-        for key in ['ear', 'mar', 'roll_angle', 'pitch_angle']:
+        # Thêm các widget cho độ mở mắt và miệng
+        for key in ['eye_openness', 'mouth_openness']:
             metrics_layout.add_widget(self.metrics_widgets[key]['label'])
             metrics_layout.add_widget(self.metrics_widgets[key]['bar'])
         
@@ -287,7 +263,7 @@ class MainScreen(Screen):
         self.background_rect.pos = instance.pos
         self.background_rect.size = instance.size
 
-    def update_metrics(self, ear, mar, roll_angle, pitch_angle, blink_count, yawn_count=None):
+    def update_metrics(self, eye_openness, mouth_openness, blink_count, yawn_count=None):
         # Cập nhật các chỉ số hiển thị
         def safe_float(value, default=None):
             if value is None:
@@ -297,36 +273,28 @@ class MainScreen(Screen):
             except (TypeError, ValueError):
                 return default
         is_alert = self.app.alert_active
-        ear_value = safe_float(ear, None)
-        self.metrics_widgets['ear']['label'].text = f'Cỡ mắt: {ear:.2f}' if ear is not None else 'Cỡ mắt: --'
-        self.metrics_widgets['ear']['label'].color = [1, 0, 0,
-                                                      1] if is_alert and ear is not None and ear_value < self.app.ear_threshold else [
+        eye_value = safe_float(eye_openness, None)
+        self.metrics_widgets['eye_openness']['label'].text = (
+            f'Độ mở mắt: {eye_openness:.2f}'
+            if eye_openness is not None
+            else 'Độ mở mắt: --'
+        )
+        self.metrics_widgets['eye_openness']['label'].color = [1, 0, 0,
+                                                      1] if is_alert and eye_openness is not None and eye_value < self.app.eye_open_threshold else [
             1, 1, 1, 1]
-        if ear is not None:
-            self.metrics_widgets['ear']['bar'].value = ear_value
-        mar_value = safe_float(mar, None)
-        self.metrics_widgets['mar']['label'].text = f'Cỡ miệng: {mar:.2f}' if mar is not None else 'Cỡ miệng: --'
-        self.metrics_widgets['mar']['label'].color = [1, 0, 0,
-                                                      1] if is_alert and mar is not None and mar_value > self.app.detector.config.YAWN_THRESHOLD else [1, 1,
+        if eye_openness is not None:
+            self.metrics_widgets['eye_openness']['bar'].value = eye_value
+        mouth_value = safe_float(mouth_openness, None)
+        self.metrics_widgets['mouth_openness']['label'].text = (
+            f'Độ mở miệng: {mouth_openness:.2f}'
+            if mouth_openness is not None
+            else 'Độ mở miệng: --'
+        )
+        self.metrics_widgets['mouth_openness']['label'].color = [1, 0, 0,
+                                                      1] if is_alert and mouth_openness is not None and mouth_value > self.app.detector.config.MOUTH_OPEN_THRESHOLD else [1, 1,
                                                                                                                                                         1, 1]
-        if mar is not None:
-            self.metrics_widgets['mar']['bar'].value = mar_value
-        roll_value = safe_float(roll_angle, None)
-        self.metrics_widgets['roll_angle'][
-            'label'].text = f'Góc nghiêng: {roll_angle:.1f}°' if roll_angle is not None else 'Góc nghiêng: --'
-        self.metrics_widgets['roll_angle']['label'].color = [1, 0, 0,
-                                                             1] if is_alert and roll_angle is not None and abs(roll_value) > self.app.detector.roll_threshold else [
-            1, 1, 1, 1]
-        if roll_angle is not None:
-            self.metrics_widgets['roll_angle']['bar'].value = abs(roll_value)
-        pitch_value = safe_float(pitch_angle, None)
-        self.metrics_widgets['pitch_angle'][
-            'label'].text = f'Góc cúi: {pitch_angle:.1f}°' if pitch_angle is not None else 'Góc cúi: --'
-        self.metrics_widgets['pitch_angle']['label'].color = [1, 0, 0,
-                                                              1] if is_alert and pitch_angle is not None and abs(pitch_value) > self.app.detector.pitch_threshold else [
-            1, 1, 1, 1]
-        if pitch_angle is not None:
-            self.metrics_widgets['pitch_angle']['bar'].value = abs(pitch_value)
+        if mouth_openness is not None:
+            self.metrics_widgets['mouth_openness']['bar'].value = mouth_value
         blink_value = safe_float(blink_count, 0)
         self.metrics_widgets['blink_count'][
             'label'].text = f'Nháy mắt: {int(blink_count)}' if blink_count is not None else 'Nháy mắt: 0'

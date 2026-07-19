@@ -8,15 +8,15 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 
 
 class Config:
-    EAR_THRESHOLD = 0.22
-    EAR_CONSEC_FRAMES = 15
-    HEAD_TILT_THRESHOLD = 15
-    PITCH_THRESHOLD = 25
-    HEAD_TILT_FRAMES = 20
-    CALIBRATION_FRAMES = 30
+    FEATURE_PIPELINE_VERSION = 1
+    EYE_OPEN_THRESHOLD = 0.20
+    EYE_CLOSED_CONSEC_FRAMES = 15
+    EYE_FEATURE_MIN_CONFIDENCE = 0.25
+    FEATURE_MIN_FACE_SIZE = 80
     BLINK_CONSEC_FRAMES = 3
     BLINK_PER_MINUTE_THRESHOLD = 25
-    YAWN_THRESHOLD = 0.3
+    MOUTH_OPEN_THRESHOLD = 0.35
+    MOUTH_FEATURE_MIN_CONFIDENCE = 0.25
     YAWN_CONSEC_FRAMES = 5
     YAWN_PER_MINUTE_THRESHOLD = 3
     NO_FACE_ALERT_FRAMES = 20
@@ -34,9 +34,7 @@ class Config:
     ALERT_COLOR = (0, 0, 255)
     TEXT_COLOR = (255, 255, 255)
     DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-    MODEL_DAT = os.path.join(DATA_DIR, "shape_predictor_68_face_landmarks.dat")
-    MODEL_DAT_BZ2 = MODEL_DAT + ".bz2"
-    MODEL_DAT_URL = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+    CALIBRATION_FILE = os.path.join(DATA_DIR, "feature_calibration.pkl")
     ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets")
     IMAGE_DIR = os.path.join(ASSETS_DIR, "images")
     SOUND_DIR = os.path.join(ASSETS_DIR, "sounds")
@@ -50,30 +48,31 @@ class Config:
     DNN_NMS_THRESHOLD = 0.4
     DNN_PROTOTXT = os.path.join(DATA_DIR, "deploy.prototxt")
     DNN_CAFFEMODEL = os.path.join(DATA_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
-    CNN_FACE_MODEL = os.path.join(DATA_DIR, "mmod_human_face_detector.dat")
-    CNN_FACE_MODEL_URL = "http://dlib.net/files/mmod_human_face_detector.dat.bz2"
 
-    FACIAL_LANDMARKS_INDEXES = {
-        "right_eye": (36, 42),
-        "left_eye": (42, 48),
-        "mouth": (48, 68)
-    }
-
-    def save_calibration(self, ear_threshold):
+    def save_calibration(self, eye_open_threshold):
         try:
             os.makedirs(self.DATA_DIR, exist_ok=True)
-            with open(os.path.join(self.DATA_DIR, "calibration.pkl"), 'wb') as f:
-                pickle.dump({'ear_threshold': ear_threshold}, f)
+            with open(self.CALIBRATION_FILE, 'wb') as f:
+                pickle.dump(
+                    {
+                        'pipeline_version': self.FEATURE_PIPELINE_VERSION,
+                        'eye_open_threshold': eye_open_threshold,
+                    },
+                    f,
+                )
         except Exception as e:
             logger.error(f"Lưu hiệu chỉnh thất bại: {e}")
 
     def load_calibration(self):
-        path = os.path.join(self.DATA_DIR, "calibration.pkl")
         try:
-            if os.path.exists(path):
-                with open(path, 'rb') as f:
+            if os.path.exists(self.CALIBRATION_FILE):
+                with open(self.CALIBRATION_FILE, 'rb') as f:
                     data = pickle.load(f)
-                    self.EAR_THRESHOLD = data.get('ear_threshold', self.EAR_THRESHOLD)
+                    if data.get('pipeline_version') != self.FEATURE_PIPELINE_VERSION:
+                        return False
+                    self.EYE_OPEN_THRESHOLD = data.get(
+                        'eye_open_threshold', self.EYE_OPEN_THRESHOLD
+                    )
                     return True
         except Exception as e:
             logger.error(f"Tải hiệu chỉnh thất bại: {e}")

@@ -1,336 +1,472 @@
-import numpy as np
+from dataclasses import dataclass
 import logging
+import threading
+
 import cv2
-from math import atan2, degrees
+import numpy as np
+
 
 logger = logging.getLogger(__name__)
 
 
-def euclidean_distance(a, b):
-    diff = a - b
-    return np.sqrt(np.sum(diff * diff))
+@dataclass
+class RegionFeatures:
+    name: str
+    roi_box: tuple
+    opening_ratio: float
+    confidence: float
+    dark_aspect: float
+    darkness_score: float
+    edge_aspect: float
+    keypoint_aspect: float
+    edges: np.ndarray
+    dark_mask: np.ndarray
+    keypoints: np.ndarray
 
 
-def _gaussian_kernel(sigma):
-    r = int(np.ceil(3 * sigma))
-    axis = np.arange(-r, r + 1, dtype=np.float64)
-    xx, yy = np.meshgrid(axis, axis)
-    kernel = np.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
-    return kernel / kernel.sum()
-
-
-def _convolve2d(image, kernel):
-    kH, kW = kernel.shape
-    pH, pW = kH // 2, kW // 2
-    padded = np.pad(image.astype(np.float64), ((pH, pH), (pW, pW)), mode='reflect')
-    H, W = image.shape
-    shape = (H, W, kH, kW)
-    strides = (padded.strides[0], padded.strides[1],
-               padded.strides[0], padded.strides[1])
-    windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
-    return np.einsum('ijkl,kl->ij', windows, kernel)
-
-
-_SOBEL_X = np.array([[-1, 0, 1],
-                     [-2, 0, 2],
-                     [-1, 0, 1]], dtype=np.float64)
-
-_SOBEL_Y = np.array([[-1, -2, -1],
-                     [0, 0, 0],
-                     [1, 2, 1]], dtype=np.float64)
-
-
-def _compute_gradient(smoothed):
-    Gx = _convolve2d(smoothed, _SOBEL_X)
-    Gy = _convolve2d(smoothed, _SOBEL_Y)
-    M = np.hypot(Gx, Gy)
-    theta = np.degrees(np.arctan2(Gy, Gx)) % 180
-    return Gx, Gy, M, theta
-
-
-def _non_max_suppression(M, theta):
-    H, W = M.shape
-    result = np.zeros_like(M)
-    direction = np.zeros_like(theta, dtype=np.int8)
-    direction[(theta >= 22.5) & (theta < 67.5)] = 1
-    direction[(theta >= 67.5) & (theta < 112.5)] = 2
-    direction[(theta >= 112.5) & (theta < 157.5)] = 3
-    dir_map = {0: (0, 1), 1: (-1, 1), 2: (-1, 0), 3: (-1, -1)}
-    for d, (dy, dx) in dir_map.items():
-        mask = (direction == d)
-        r1 = np.clip(np.arange(H)[:, None] + dy, 0, H - 1)
-        c1 = np.clip(np.arange(W)[None, :] + dx, 0, W - 1)
-        r2 = np.clip(np.arange(H)[:, None] - dy, 0, H - 1)
-        c2 = np.clip(np.arange(W)[None, :] - dx, 0, W - 1)
-        keep = mask & (M >= M[r1, c1]) & (M >= M[r2, c2])
-        result[keep] = M[keep]
-    return result
-
-
-def _hysteresis(nms_map, low, high):
-    strong = nms_map >= high
-    weak = (nms_map >= low) & ~strong
-    result = strong.copy()
-    H, W = nms_map.shape
-    from collections import deque
-    q = deque(zip(*np.where(strong)))
-    while q:
-        y, x = q.popleft()
-        y0, y1 = max(0, y - 1), min(H, y + 2)
-        x0, x1 = max(0, x - 1), min(W, x + 2)
-        for ny in range(y0, y1):
-            for nx in range(x0, x1):
-                if (ny == y and nx == x) or not weak[ny, nx] or result[ny, nx]:
-                    continue
-                result[ny, nx] = True
-                q.append((ny, nx))
-    return result.astype(np.uint8) * 255
-
-
-def _otsu_threshold(nms_map):
-    nonzero = nms_map[nms_map > 0]
-    if len(nonzero) == 0:
-        return 50, 25
-    max_val = nms_map.max()
-    if max_val == 0:
-        return 50, 25
-    pixel_u8 = (nonzero / max_val * 255).astype(np.uint8)
-    hist = np.bincount(pixel_u8, minlength=256).astype(np.float64)
-    total = hist.sum()
-    bins = np.arange(256, dtype=np.float64)
-    cum_w = np.cumsum(hist) / total
-    cum_mu = np.cumsum(hist * bins) / total
-    mu_all = cum_mu[-1]
-    w0 = cum_w
-    w1 = 1.0 - w0
-    mu0 = np.where(w0 > 0, cum_mu / (w0 + 1e-12), 0)
-    mu1 = np.where(w1 > 0, (mu_all - cum_mu) / (w1 + 1e-12), 0)
-    variance = w0 * w1 * (mu0 - mu1) ** 2
-    t_opt = int(np.argmax(variance))
-    h = t_opt / 255.0 * max_val
-    l = h / 2.0
-    return max(h, 10), max(l, 5)
-
-
-_CANNY_KERNEL_CACHE = {}
-
-
-def manual_canny(gray, sigma=0.8, low=None, high=None):
-    if sigma not in _CANNY_KERNEL_CACHE:
-        _CANNY_KERNEL_CACHE[sigma] = _gaussian_kernel(sigma)
-    smoothed = _convolve2d(gray, _CANNY_KERNEL_CACHE[sigma])
-    _, _, M, theta = _compute_gradient(smoothed)
-    nms = _non_max_suppression(M, theta)
-    if low is None or high is None:
-        high, low = _otsu_threshold(nms)
-    edges = _hysteresis(nms, low, high)
-    return edges
-
-
-def _clahe(gray, clip_limit=2.0, tile_grid_size=(8, 8)):
-    gray = np.asarray(gray, dtype=np.float64)
-    h, w = gray.shape
-    t_h = h // tile_grid_size[0]
-    t_w = w // tile_grid_size[1]
-    bins = 256
-
-    mappings = np.zeros((tile_grid_size[0], tile_grid_size[1], bins), dtype=np.float64)
-    for ti in range(tile_grid_size[0]):
-        for tj in range(tile_grid_size[1]):
-            y0, y1 = ti * t_h, (ti + 1) * t_h
-            x0, x1 = tj * t_w, (tj + 1) * t_w
-            tile = gray[y0:y1, x0:x1].ravel().astype(np.intp)
-            hist = np.bincount(tile, minlength=bins).astype(np.float64)
-            clip_val = clip_limit * (tile.size / bins) if clip_limit > 0 else 0
-            if clip_val > 0:
-                excess = np.sum(np.maximum(hist - clip_val, 0))
-                hist = np.minimum(hist, clip_val)
-                hist += excess / bins
-            cdf = hist.cumsum()
-            cdf = cdf / cdf[-1] * 255.0
-            mappings[ti, tj] = cdf
-
-    ti_f = (np.arange(h, dtype=np.float64) + 0.5) / t_h - 0.5
-    tj_f = (np.arange(w, dtype=np.float64) + 0.5) / t_w - 0.5
-    ti_f = np.clip(ti_f, 0, tile_grid_size[0] - 1)
-    tj_f = np.clip(tj_f, 0, tile_grid_size[1] - 1)
-    ti0 = np.floor(ti_f).astype(np.intp)
-    ti1 = np.minimum(ti0 + 1, tile_grid_size[0] - 1).astype(np.intp)
-    tj0 = np.floor(tj_f).astype(np.intp)
-    tj1 = np.minimum(tj0 + 1, tile_grid_size[1] - 1).astype(np.intp)
-    dy = (ti_f - ti0)[:, np.newaxis]
-    dx = (tj_f - tj0)[np.newaxis, :]
-    idx = np.clip(np.round(gray), 0, bins - 1).astype(np.intp)
-
-    shape = (h, w)
-    v00 = mappings[ti0[:, np.newaxis], tj0[np.newaxis, :], idx]
-    v10 = mappings[ti1[:, np.newaxis], tj0[np.newaxis, :], idx]
-    v01 = mappings[ti0[:, np.newaxis], tj1[np.newaxis, :], idx]
-    v11 = mappings[ti1[:, np.newaxis], tj1[np.newaxis, :], idx]
-    result = (v00 * (1 - dx) + v01 * dx) * (1 - dy) + (v10 * (1 - dx) + v11 * dx) * dy
-    return np.clip(np.round(result), 0, 255).astype(np.uint8)
-
-
-def _bounding_rect(pts):
-    xs = pts[:, 0]
-    ys = pts[:, 1]
-    x = int(xs.min())
-    y = int(ys.min())
-    w = int(xs.max() - x)
-    h = int(ys.max() - y)
-    return x, y, w, h
-
-
-def _largest_blob_area(binary):
-    labeled, _ = _label_components(binary)
-    if labeled is None:
-        return 0
-    labels = labeled[labeled > 0]
-    if len(labels) == 0:
-        return 0
-    counts = np.bincount(labels)
-    return int(counts.max())
-
-
-def _label_components(binary):
-    binary = (binary > 0).astype(np.uint8)
-    h, w = binary.shape
-    labeled = np.zeros((h, w), dtype=np.int32)
-    current_label = 1
-    equivalences = {}
-
-    def find(x):
-        while equivalences.get(x, x) != x:
-            equivalences[x] = equivalences[equivalences[x]]
-            x = equivalences[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            equivalences[ra] = rb
-
-    for i in range(h):
-        for j in range(w):
-            if binary[i, j] == 0:
-                continue
-            neighbors = []
-            if i > 0 and labeled[i - 1, j] > 0:
-                neighbors.append(labeled[i - 1, j])
-            if j > 0 and labeled[i, j - 1] > 0:
-                neighbors.append(labeled[i, j - 1])
-            if not neighbors:
-                labeled[i, j] = current_label
-                equivalences[current_label] = current_label
-                current_label += 1
-            else:
-                labeled[i, j] = min(neighbors)
-                for n in neighbors:
-                    union(labeled[i, j], n)
-
-    for i in range(h):
-        for j in range(w):
-            if labeled[i, j] > 0:
-                labeled[i, j] = find(labeled[i, j])
-
-    unique = np.unique(labeled[labeled > 0])
-    if len(unique) == 0:
-        return None, None
-    mapping = {old: new + 1 for new, old in enumerate(unique)}
-    remapped = np.zeros_like(labeled)
-    for i in range(h):
-        for j in range(w):
-            if labeled[i, j] > 0:
-                remapped[i, j] = mapping[labeled[i, j]]
-
-    return remapped, len(unique)
+@dataclass
+class FaceFeatures:
+    eye_openness: float
+    mouth_openness: float
+    eye_confidence: float
+    mouth_confidence: float
+    eye_candidate_count: int
+    regions: dict
 
 
 class FacialAnalyzer:
+    """Analyze eye and mouth state without a facial-landmark model."""
+
+    EYE_REGIONS = {
+        "left_eye": (0.08, 0.24, 0.50, 0.50),
+        "right_eye": (0.50, 0.24, 0.92, 0.50),
+    }
+    MOUTH_REGION = (0.18, 0.56, 0.82, 0.92)
+
     def __init__(self):
-        self.min_ear = 0.15
-        self.max_ear = 0.40
+        self._analysis_lock = threading.RLock()
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self._eye_cascade_path = (
+            cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
+        )
+        self._eye_cascade = self._load_eye_cascade()
 
     def apply_clahe(self, gray_frame):
+        with self._analysis_lock:
+            if (
+                not isinstance(gray_frame, np.ndarray)
+                or gray_frame.size == 0
+                or gray_frame.ndim != 2
+            ):
+                raise ValueError("CLAHE requires a non-empty grayscale image")
+            return self._clahe.apply(np.ascontiguousarray(gray_frame))
+
+    def _load_eye_cascade(self):
+        cascade = cv2.CascadeClassifier(self._eye_cascade_path)
+        if cascade.empty():
+            logger.warning("Eye cascade is unavailable: %s", self._eye_cascade_path)
+        return cascade
+
+    @staticmethod
+    def _clip_box(box, image_shape):
         try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            return clahe.apply(gray_frame)
-        except Exception as e:
-            logger.warning(f"Native OpenCV CLAHE failed, falling back to manual: {e}")
-            return _clahe(gray_frame, clip_limit=2.0, tile_grid_size=(8, 8))
-
-    def calculate_ear(self, eye_points):
-        points = np.array(eye_points, dtype=np.float32)
-        A = euclidean_distance(points[1], points[5])
-        B = euclidean_distance(points[2], points[4])
-        C = euclidean_distance(points[0], points[3])
-        ear = (A + B) / (2.0 * C) if C > 0 else 0.0
-        return np.clip(ear, self.min_ear, self.max_ear)
-
-    def calculate_mar(self, mouth_points):
-        A = euclidean_distance(mouth_points[13], mouth_points[19])
-        B = euclidean_distance(mouth_points[14], mouth_points[18])
-        C = euclidean_distance(mouth_points[15], mouth_points[17])
-        D = euclidean_distance(mouth_points[12], mouth_points[16])
-        return (A + B + C) / (3.0 * D) if D > 0 else 0.0
-
-    def extract_eye_roi(self, gray, eye_points, margin=10):
-        pts = np.array(eye_points, dtype=np.int32)
-        x, y, w, h = _bounding_rect(pts)
-        x = max(0, x - margin)
-        y = max(0, y - margin)
-        w = min(gray.shape[1] - x, w + 2 * margin)
-        h = min(gray.shape[0] - y, h + 2 * margin)
-        return gray[y:y + h, x:x + w]
-
-    def apply_canny_on_eye(self, gray, eye_points, low=None, high=None):
-        roi = self.extract_eye_roi(gray, eye_points)
-        if roi.size == 0:
-            return np.zeros((10, 10), dtype=np.uint8)
-        try:
-            # Apply Gaussian Blur first to match manual_canny's smoothing
-            blurred = cv2.GaussianBlur(roi, (3, 3), 0.8)
-            if low is None or high is None:
-                # Use Otsu's thresholding to determine thresholds automatically
-                high_val, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-                low_val = 0.5 * high_val
-            else:
-                low_val, high_val = low, high
-            edges = cv2.Canny(blurred, int(low_val), int(high_val))
-            return edges
-        except Exception as e:
-            logger.warning(f"Native OpenCV Canny failed, falling back to manual: {e}")
-            return manual_canny(roi, sigma=0.8, low=low, high=high)
-
-    def detect_iris_by_contour(self, eye_edges):
-        if eye_edges.size == 0:
+            values = np.asarray(box, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
             return None
-        area = _largest_blob_area(eye_edges)
-        return area
+        if values.size != 4 or not np.all(np.isfinite(values)):
+            return None
+        image_h, image_w = image_shape[:2]
+        x1 = max(0, min(image_w, int(np.floor(values[0]))))
+        y1 = max(0, min(image_h, int(np.floor(values[1]))))
+        x2 = max(0, min(image_w, int(np.ceil(values[2]))))
+        y2 = max(0, min(image_h, int(np.ceil(values[3]))))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
 
-    def calculate_head_pose(self, shape_np):
-        left_eye_center = np.mean(shape_np[36:42], axis=0)
-        right_eye_center = np.mean(shape_np[42:48], axis=0)
-        nose_bridge = shape_np[27]
-        nose_tip = shape_np[30]
-        left_mouth = shape_np[48]
-        right_mouth = shape_np[54]
+    @staticmethod
+    def _relative_box(face_box, relative_box, image_shape):
+        image_h, image_w = image_shape[:2]
+        x1, y1, x2, y2 = [int(value) for value in face_box]
+        face_w = max(1, x2 - x1)
+        face_h = max(1, y2 - y1)
+        rx1, ry1, rx2, ry2 = relative_box
+        box = (
+            max(0, min(image_w, int(round(x1 + rx1 * face_w)))),
+            max(0, min(image_h, int(round(y1 + ry1 * face_h)))),
+            max(0, min(image_w, int(round(x1 + rx2 * face_w)))),
+            max(0, min(image_h, int(round(y1 + ry2 * face_h)))),
+        )
+        return box
 
-        eye_center = (left_eye_center + right_eye_center) / 2.0
-        mouth_center = (left_mouth + right_mouth) / 2.0
+    @staticmethod
+    def _auto_canny(gray):
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0.9)
+        otsu_threshold, _ = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
+        )
+        high = int(np.clip(otsu_threshold, 45, 180))
+        low = max(15, int(high * 0.45))
+        return cv2.Canny(blurred, low, high), blurred
 
-        eye_vector = right_eye_center - left_eye_center
-        roll_angle = degrees(atan2(eye_vector[1], eye_vector[0]))
+    @staticmethod
+    def _analysis_mask(shape, region_type):
+        height, width = shape
+        mask = np.zeros((height, width), dtype=np.uint8)
+        if region_type == "eye":
+            y1, y2 = int(0.18 * height), int(0.95 * height)
+            x1, x2 = int(0.05 * width), int(0.95 * width)
+        else:
+            y1, y2 = int(0.08 * height), int(0.95 * height)
+            x1, x2 = int(0.04 * width), int(0.96 * width)
+        mask[y1:y2, x1:x2] = 255
+        return mask
 
-        face_height = euclidean_distance(eye_center, mouth_center)
-        nose_height = euclidean_distance(nose_bridge, nose_tip)
+    @staticmethod
+    def _dark_component(mask, region_type):
+        height, width = mask.shape
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        best_score = 0.0
 
-        pitch_ratio = nose_height / face_height if face_height > 0 else 0
-        pitch_angle = (pitch_ratio - 0.35) * 100
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < height * width * 0.003:
+                continue
+            x, y, box_w, box_h = cv2.boundingRect(contour)
+            if box_w < width * 0.07 or box_h < 2:
+                continue
 
-        return roll_angle, pitch_angle, pitch_ratio
+            center_x = (x + box_w / 2.0) / width
+            center_y = (y + box_h / 2.0) / height
+            if not 0.12 <= center_x <= 0.88:
+                continue
+            if region_type == "eye" and not 0.22 <= center_y <= 0.88:
+                continue
+            if region_type == "mouth" and not 0.18 <= center_y <= 0.90:
+                continue
+
+            center_weight = max(0.25, 1.0 - abs(center_x - 0.5))
+            vertical_weight = 0.5 + min(1.0, box_h / max(1.0, height * 0.35))
+            score = area * center_weight * vertical_weight
+            if score > best_score:
+                best_score = score
+                best = (x, y, box_w, box_h, area)
+
+        return best
+
+    @staticmethod
+    def _edge_aspect(edges, component):
+        height, width = edges.shape
+        if component is not None:
+            x, y, box_w, box_h, _ = component
+            margin_x = max(2, int(box_w * 0.20))
+            x1 = max(0, x - margin_x)
+            x2 = min(width, x + box_w + margin_x)
+            y1 = max(0, y - max(2, int(box_h * 0.35)))
+            y2 = min(height, y + box_h + max(2, int(box_h * 0.35)))
+        else:
+            x1, x2 = int(width * 0.12), int(width * 0.88)
+            y1, y2 = int(height * 0.18), int(height * 0.92)
+
+        spans = []
+        for x_pos in range(x1, x2):
+            rows = np.flatnonzero(edges[y1:y2, x_pos])
+            if rows.size >= 2:
+                spans.append(float(np.percentile(rows, 90) - np.percentile(rows, 10)))
+
+        if not spans:
+            return 0.0
+        horizontal_span = max(1.0, float(x2 - x1))
+        return float(np.median(spans) / horizontal_span)
+
+    @staticmethod
+    def _keypoint_features(gray, feature_mask, roi_box):
+        points = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=24,
+            qualityLevel=0.025,
+            minDistance=max(3, gray.shape[1] // 18),
+            mask=feature_mask,
+            blockSize=5,
+            useHarrisDetector=False,
+        )
+        if points is None:
+            return 0.0, np.empty((0, 2), dtype=np.int32)
+
+        points = points.reshape(-1, 2)
+        if len(points) < 2:
+            return 0.0, np.empty((0, 2), dtype=np.int32)
+
+        x_span = float(np.percentile(points[:, 0], 90) - np.percentile(points[:, 0], 10))
+        y_span = float(np.percentile(points[:, 1], 90) - np.percentile(points[:, 1], 10))
+        aspect = y_span / max(1.0, x_span)
+
+        x1, y1, x2, y2 = roi_box
+        scale_x = (x2 - x1) / gray.shape[1]
+        scale_y = (y2 - y1) / gray.shape[0]
+        absolute = np.column_stack(
+            (
+                np.round(x1 + points[:, 0] * scale_x),
+                np.round(y1 + points[:, 1] * scale_y),
+            )
+        ).astype(np.int32)
+        return float(aspect), absolute
+
+    def _analyze_region(self, gray, roi_box, name, region_type):
+        target_size = (120, 60) if region_type == "eye" else (140, 84)
+        clipped_box = self._clip_box(roi_box, gray.shape)
+        if clipped_box is None:
+            empty = np.zeros((target_size[1], target_size[0]), dtype=np.uint8)
+            return RegionFeatures(
+                name,
+                (0, 0, 0, 0),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                empty,
+                empty.copy(),
+                np.empty((0, 2), dtype=np.int32),
+            )
+
+        x1, y1, x2, y2 = clipped_box
+        roi = np.ascontiguousarray(gray[y1:y2, x1:x2])
+        if roi.size == 0 or roi.shape[0] < 5 or roi.shape[1] < 5:
+            empty = np.zeros((target_size[1], target_size[0]), dtype=np.uint8)
+            return RegionFeatures(
+                name,
+                clipped_box,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                empty,
+                empty.copy(),
+                np.empty((0, 2), dtype=np.int32),
+            )
+
+        normalized = cv2.resize(roi, target_size, interpolation=cv2.INTER_LINEAR)
+        normalized = self.apply_clahe(normalized)
+        edges, blurred = self._auto_canny(normalized)
+        feature_mask = self._analysis_mask(normalized.shape, region_type)
+        edges = cv2.bitwise_and(edges, feature_mask)
+
+        _, dark_mask = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel)
+        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel)
+        dark_mask = cv2.bitwise_and(dark_mask, feature_mask)
+
+        component = self._dark_component(dark_mask, region_type)
+        dark_aspect = 0.0
+        darkness_score = 0.0
+        component_area_ratio = 0.0
+        if component is not None:
+            component_x, component_y, box_w, box_h, area = component
+            dark_aspect = box_h / max(1.0, float(box_w))
+            component_area_ratio = area / float(normalized.size)
+            component_pixels = blurred[
+                component_y:component_y + box_h,
+                component_x:component_x + box_w,
+            ]
+            if component_pixels.size:
+                component_mean = float(np.mean(component_pixels))
+                darkness_score = float(np.clip((205.0 - component_mean) / 130.0, 0.10, 1.0))
+
+        edge_aspect = self._edge_aspect(edges, component)
+        keypoint_aspect, keypoints = self._keypoint_features(
+            normalized, feature_mask, clipped_box
+        )
+
+        opening_ratio = (
+            0.58 * min(dark_aspect, 1.2)
+            + 0.27 * min(edge_aspect, 1.0)
+            + 0.15 * min(keypoint_aspect, 1.0)
+        )
+        if region_type == "mouth":
+            opening_ratio *= darkness_score
+        opening_ratio = float(np.clip(opening_ratio, 0.0, 1.0))
+
+        edge_density = np.count_nonzero(edges) / float(edges.size)
+        point_confidence = min(1.0, len(keypoints) / 8.0)
+        component_confidence = min(1.0, component_area_ratio / 0.025)
+        confidence = float(
+            np.clip(
+                0.45 * component_confidence
+                + 0.35 * point_confidence
+                + 0.20 * min(1.0, edge_density / 0.08),
+                0.0,
+                1.0,
+            )
+        )
+
+        return RegionFeatures(
+            name=name,
+            roi_box=clipped_box,
+            opening_ratio=opening_ratio,
+            confidence=confidence,
+            dark_aspect=float(dark_aspect),
+            darkness_score=float(darkness_score),
+            edge_aspect=float(edge_aspect),
+            keypoint_aspect=float(keypoint_aspect),
+            edges=edges,
+            dark_mask=dark_mask,
+            keypoints=keypoints,
+        )
+
+    @staticmethod
+    def _overlap_ratio(first, second):
+        x1 = max(first[0], second[0])
+        y1 = max(first[1], second[1])
+        x2 = min(first[2], second[2])
+        y2 = min(first[3], second[3])
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        if intersection == 0:
+            return 0.0
+        first_area = max(1, (first[2] - first[0]) * (first[3] - first[1]))
+        second_area = max(1, (second[2] - second[0]) * (second[3] - second[1]))
+        return intersection / float(min(first_area, second_area))
+
+    def _detect_eye_candidates(self, gray, face_box):
+        if self._eye_cascade.empty():
+            return []
+
+        image_h, image_w = gray.shape[:2]
+        clipped_face = self._clip_box(face_box, gray.shape)
+        if clipped_face is None:
+            return []
+        x1, y1, x2, y2 = clipped_face
+        face_w = max(1, x2 - x1)
+        face_h = max(1, y2 - y1)
+        upper_y2 = min(image_h, y1 + int(face_h * 0.62))
+        upper_face = gray[max(0, y1):upper_y2, max(0, x1):min(image_w, x2)]
+        if upper_face.size == 0:
+            return []
+
+        upper_face = self.apply_clahe(np.ascontiguousarray(upper_face))
+        min_size = (max(10, int(face_w * 0.13)), max(8, int(face_h * 0.09)))
+        try:
+            detections = self._eye_cascade.detectMultiScale(
+                upper_face,
+                scaleFactor=1.10,
+                minNeighbors=3,
+                minSize=min_size,
+            )
+        except cv2.error as exc:
+            logger.warning("Eye cascade failed; reloading it: %s", exc)
+            self._eye_cascade = self._load_eye_cascade()
+            return []
+
+        candidates = []
+        for ex, ey, ew, eh in detections:
+            center_x = (ex + ew / 2.0) / face_w
+            center_y = (ey + eh / 2.0) / max(1.0, upper_face.shape[0])
+            if not 0.08 <= center_x <= 0.92 or not 0.20 <= center_y <= 0.92:
+                continue
+
+            margin_x = int(ew * 0.18)
+            margin_y = int(eh * 0.12)
+            box = (
+                max(0, x1 + ex - margin_x),
+                max(0, y1 + ey - margin_y),
+                min(image_w, x1 + ex + ew + margin_x),
+                min(image_h, y1 + ey + eh + margin_y),
+            )
+            candidates.append(box)
+
+        candidates.sort(
+            key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True
+        )
+        selected = []
+        for candidate in candidates:
+            if all(self._overlap_ratio(candidate, other) < 0.35 for other in selected):
+                selected.append(candidate)
+            if len(selected) == 2:
+                break
+        return sorted(selected, key=lambda box: box[0])
+
+    def analyze_face(self, gray, face_box):
+        with self._analysis_lock:
+            if (
+                not isinstance(gray, np.ndarray)
+                or gray.size == 0
+                or gray.ndim != 2
+            ):
+                return FaceFeatures(0.0, 0.0, 0.0, 0.0, 0, {})
+            gray = np.ascontiguousarray(gray)
+            clipped_face = self._clip_box(face_box, gray.shape)
+            if clipped_face is None:
+                return FaceFeatures(0.0, 0.0, 0.0, 0.0, 0, {})
+            return self._analyze_face(gray, clipped_face)
+
+    def _analyze_face(self, gray, face_box):
+        regions = {}
+        eye_values = []
+        eye_confidences = []
+        eye_candidates = self._detect_eye_candidates(gray, face_box)
+
+        eye_boxes = []
+        if eye_candidates:
+            eye_boxes.extend(eye_candidates)
+        for relative_box in self.EYE_REGIONS.values():
+            if len(eye_boxes) >= 2:
+                break
+            fallback_box = self._relative_box(face_box, relative_box, gray.shape)
+            if all(self._overlap_ratio(fallback_box, box) < 0.45 for box in eye_boxes):
+                eye_boxes.append(fallback_box)
+        eye_boxes = sorted(eye_boxes[:2], key=lambda box: box[0])
+
+        for name, roi_box in zip(self.EYE_REGIONS, eye_boxes):
+            region = self._analyze_region(gray, roi_box, name, "eye")
+            regions[name] = region
+            if region.confidence > 0.10:
+                eye_values.append(region.opening_ratio)
+                eye_confidences.append(region.confidence)
+
+        mouth_box = self._relative_box(face_box, self.MOUTH_REGION, gray.shape)
+        mouth = self._analyze_region(gray, mouth_box, "mouth", "mouth")
+        regions["mouth"] = mouth
+
+        geometry_openness = float(np.median(eye_values)) if eye_values else 0.0
+        candidate_coverage = min(1.0, len(eye_candidates) / 2.0)
+        eye_openness = geometry_openness * (0.35 + 0.65 * candidate_coverage)
+        eye_confidence = float(np.mean(eye_confidences)) if eye_confidences else 0.0
+        eye_confidence *= 0.55 + 0.45 * candidate_coverage
+
+        return FaceFeatures(
+            eye_openness=float(eye_openness),
+            mouth_openness=mouth.opening_ratio,
+            eye_confidence=float(eye_confidence),
+            mouth_confidence=mouth.confidence,
+            eye_candidate_count=len(eye_candidates),
+            regions=regions,
+        )
+
+    @staticmethod
+    def draw_features(frame, face_box, analysis):
+        x1, y1, x2, y2 = [int(value) for value in face_box]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 210, 255), 2)
+
+        colors = {
+            "left_eye": (0, 255, 0),
+            "right_eye": (0, 255, 0),
+            "mouth": (255, 180, 0),
+        }
+        for name, region in analysis.regions.items():
+            rx1, ry1, rx2, ry2 = region.roi_box
+            color = colors[name]
+            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color, 1)
+            for point in region.keypoints:
+                cv2.circle(frame, tuple(point), 2, color, -1)
+        return frame
 
     def reset_display(self):
-        import cv2
         cv2.destroyAllWindows()
-        logger.info("Reset hiển thị")
+        logger.info("Reset display")

@@ -1,14 +1,18 @@
-import cv2
-import dlib
-import numpy as np
-import time
 import logging
 import os
+import threading
+import time
 from collections import deque
+
+import cv2
+import numpy as np
+
 from src.configs.config import Config
-from src.core.model_manager import ModelManager
-from src.core.facial_analyzer import FacialAnalyzer
 from src.core.alert_system import AlertSystem
+from src.core.facial_analyzer import FacialAnalyzer
+from src.core.feature_classifier import classify_face_features
+from src.core.model_manager import ModelManager
+
 
 logger = logging.getLogger(__name__)
 
@@ -43,46 +47,62 @@ def manual_resize(img, new_w, new_h):
         v10 = img[iy1[:, np.newaxis], ix0[np.newaxis, :]]
         v01 = img[iy0[:, np.newaxis], ix1[np.newaxis, :]]
         v11 = img[iy1[:, np.newaxis], ix1[np.newaxis, :]]
-        result = (v00 * (1 - dx) + v01 * dx) * (1 - dy) + (v10 * (1 - dx) + v11 * dx) * dy
+        result = (
+            (v00 * (1 - dx) + v01 * dx) * (1 - dy)
+            + (v10 * (1 - dx) + v11 * dx) * dy
+        )
         return np.clip(np.round(result), 0, 255).astype(img.dtype)
-    else:
-        c = img.shape[2]
-        result = np.zeros((new_h, new_w, c), dtype=img.dtype)
-        for k in range(c):
-            v00 = img[iy0[:, np.newaxis], ix0[np.newaxis, :], k]
-            v10 = img[iy1[:, np.newaxis], ix0[np.newaxis, :], k]
-            v01 = img[iy0[:, np.newaxis], ix1[np.newaxis, :], k]
-            v11 = img[iy1[:, np.newaxis], ix1[np.newaxis, :], k]
-            result[:, :, k] = (v00 * (1 - dx) + v01 * dx) * (1 - dy) + (v10 * (1 - dx) + v11 * dx) * dy
-        return np.clip(np.round(result), 0, 255).astype(img.dtype)
+
+    channels = img.shape[2]
+    result = np.zeros((new_h, new_w, channels), dtype=np.float64)
+    for channel in range(channels):
+        v00 = img[iy0[:, np.newaxis], ix0[np.newaxis, :], channel]
+        v10 = img[iy1[:, np.newaxis], ix0[np.newaxis, :], channel]
+        v01 = img[iy0[:, np.newaxis], ix1[np.newaxis, :], channel]
+        v11 = img[iy1[:, np.newaxis], ix1[np.newaxis, :], channel]
+        result[:, :, channel] = (
+            (v00 * (1 - dx) + v01 * dx) * (1 - dy)
+            + (v10 * (1 - dx) + v11 * dx) * dy
+        )
+    return np.clip(np.round(result), 0, 255).astype(img.dtype)
 
 
 def non_max_suppression(boxes, scores, iou_threshold=0.4):
-    if len(boxes) == 0:
+    if not boxes:
         return [], []
-    boxes = np.array(boxes, dtype=np.float64)
-    scores = np.array(scores, dtype=np.float64)
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-    order = scores.argsort()[::-1]
+
+    boxes_array = np.asarray(boxes, dtype=np.float64)
+    scores_array = np.asarray(scores, dtype=np.float64)
+    x1 = boxes_array[:, 0]
+    y1 = boxes_array[:, 1]
+    x2 = boxes_array[:, 2]
+    y2 = boxes_array[:, 3]
+    areas = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+    order = scores_array.argsort()[::-1]
     keep = []
-    for i in order:
-        if len(keep) == 0:
-            keep.append(i)
-            continue
-        xx1 = np.maximum(x1[i], x1[keep])
-        yy1 = np.maximum(y1[i], y1[keep])
-        xx2 = np.minimum(x2[i], x2[keep])
-        yy2 = np.minimum(y2[i], y2[keep])
-        w = np.maximum(0, xx2 - xx1 + 1)
-        h = np.maximum(0, yy2 - yy1 + 1)
-        overlap = (w * h) / areas[i]
-        if np.all(overlap <= iou_threshold):
-            keep.append(i)
-    return [boxes[i] for i in keep], [scores[i] for i in keep]
+
+    while order.size:
+        current = int(order[0])
+        keep.append(current)
+        if order.size == 1:
+            break
+
+        remaining = order[1:]
+        xx1 = np.maximum(x1[current], x1[remaining])
+        yy1 = np.maximum(y1[current], y1[remaining])
+        xx2 = np.minimum(x2[current], x2[remaining])
+        yy2 = np.minimum(y2[current], y2[remaining])
+        intersection = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+        union = areas[current] + areas[remaining] - intersection
+        iou = np.divide(
+            intersection,
+            union,
+            out=np.zeros_like(intersection),
+            where=union > 0,
+        )
+        order = remaining[iou <= iou_threshold]
+
+    return [boxes_array[index] for index in keep], [scores_array[index] for index in keep]
 
 
 class PipelineStage:
@@ -103,67 +123,47 @@ class PipelineStage:
 class DrowsinessDetector:
     def __init__(self, save_pipeline=False):
         self.config = Config()
+        self.config.load_calibration()
         self.model_manager = ModelManager()
         self.analyzer = FacialAnalyzer()
         self.alert_system = AlertSystem()
         self.camera = None
-        self.ear_threshold = self.config.EAR_THRESHOLD
-        self.ear_consec_frames = self.config.EAR_CONSEC_FRAMES
-        self.blink_consec_frames = self.config.BLINK_CONSEC_FRAMES
-        self.no_face_alert_frames = self.config.NO_FACE_ALERT_FRAMES
-        self.eye_counter = 0
-        self.no_face_counter = 0
-        self.face_detected = False
-        self.drowsiness_start_time = None
-        # Check if dlib was compiled with CUDA and if a GPU is available
-        self.dlib_cuda_available = False
-        try:
-            if hasattr(dlib, 'DLIB_USE_CUDA') and dlib.DLIB_USE_CUDA:
-                self.dlib_cuda_available = True
-            elif hasattr(dlib, 'cuda') and hasattr(dlib.cuda, 'get_num_devices') and dlib.cuda.get_num_devices() > 0:
-                self.dlib_cuda_available = True
-        except Exception:
-            pass
+        self._camera_lock = threading.RLock()
+        self._processing_lock = threading.RLock()
 
-        # CPU safety configuration: disable CNN by default unless CUDA is available or explicitly forced
-        self.use_cnn_fallback = getattr(self.config, 'USE_CNN_FALLBACK', self.dlib_cuda_available)
+        self.eye_open_threshold = self.config.EYE_OPEN_THRESHOLD
+        self.eye_closed_consec_frames = self.config.EYE_CLOSED_CONSEC_FRAMES
+        self.blink_consec_frames = self.config.BLINK_CONSEC_FRAMES
+        self.mouth_open_threshold = self.config.MOUTH_OPEN_THRESHOLD
+        self.yawn_consec_frames = self.config.YAWN_CONSEC_FRAMES
+        self.no_face_alert_frames = self.config.NO_FACE_ALERT_FRAMES
 
         self.face_cascade = self._init_face_cascade()
         self.face_net_dnn = self._init_face_detector_dnn()
-        self.face_cnn_detector = self._init_face_detector_cnn() if self.use_cnn_fallback else None
-        self.landmark_predictor = self.model_manager.predictor
-        self.last_cnn_check_time = 0.0
-        self.cnn_cooldown = 1.5  # seconds between CNN checks (run at most once per 1.5 seconds)
-        self.last_hog_check_time = 0.0
-        self.hog_cooldown = 0.3  # seconds between HOG checks when face is lost (run at most once per 0.3 seconds)
-        self.roll_threshold = self.config.HEAD_TILT_THRESHOLD
-        self.pitch_threshold = self.config.PITCH_THRESHOLD
-        self.head_tilt_frames = self.config.HEAD_TILT_FRAMES
-        self.head_tilt_counter = 0
-        self.reference_roll = None
-        self.reference_pitch = None
-        self.roll_history = deque(maxlen=self.config.CALIBRATION_FRAMES)
-        self.pitch_history = deque(maxlen=self.config.CALIBRATION_FRAMES)
-        self.calibrated = False
+
+        self.no_face_counter = 0
+        self.face_detected = False
+        self.eye_counter = 0
+        self.eye_transition_counter = 0
+        self.eye_closed = False
+        self.drowsiness_start_time = None
+
         self.blink_total = 0
+        self.blink_times = deque(maxlen=100)
         self.blink_per_minute_threshold = self.config.BLINK_PER_MINUTE_THRESHOLD
-        self.yawn_threshold = self.config.YAWN_THRESHOLD
-        self.yawn_consec_frames = self.config.YAWN_CONSEC_FRAMES
+
         self.yawn_counter = 0
         self.yawn_total = 0
         self.yawn_times = deque(maxlen=100)
         self.yawn_per_minute_threshold = self.config.YAWN_PER_MINUTE_THRESHOLD
         self.mouth_open = False
-        self.eye_closed = False
-        self.ear_history = deque(maxlen=30)
-        self.eye_closed_counter = 0
-        self.blink_times = deque(maxlen=100)
-        self.fatigue_alert = False
-        self.fatigue_start_time = None
-        self.last_reset_time = time.time()
-        self.calibration_ear_values = []
+
         self.fatigue_alert_count = 0
+        self.fatigue_start_time = None
         self.notification_duration = self.config.NOTIFICATION_DURATION
+        self.last_reset_time = time.time()
+
+        self.calibration_eye_values = []
         self.save_pipeline = save_pipeline
         self.pipeline = PipelineStage() if save_pipeline else None
         self._last_canny_left = None
@@ -172,503 +172,496 @@ class DrowsinessDetector:
     def _init_face_cascade(self):
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         if not os.path.exists(cascade_path):
-            logger.error(f"Haar cascade not found at {cascade_path}")
+            logger.error("Haar face cascade not found at %s", cascade_path)
             return None
-        logger.info("Initialized Haar cascade face detector")
         return cv2.CascadeClassifier(cascade_path)
 
     def _init_face_detector_dnn(self):
         proto = self.config.DNN_PROTOTXT
         model = self.config.DNN_CAFFEMODEL
         if not os.path.exists(proto) or not os.path.exists(model):
-            logger.warning("DNN model files not found, downloading...")
-            self.model_manager.download_dnn_models()
+            try:
+                self.model_manager.download_dnn_models()
+            except Exception as exc:
+                logger.warning("DNN face model is unavailable: %s", exc)
+                return None
         try:
-            net = cv2.dnn.readNetFromCaffe(proto, model)
-            logger.info("Initialized OpenCV DNN face detector (SSD)")
-            return net
-        except Exception as e:
-            logger.error(f"DNN face detector init failed: {e}")
+            return cv2.dnn.readNetFromCaffe(proto, model)
+        except Exception as exc:
+            logger.warning("DNN face detector initialization failed: %s", exc)
             return None
-
-    def detect_faces_dnn(self, frame):
-        if self.face_net_dnn is None:
-            return [], []
-        h, w = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(
-            cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0)
-        )
-        self.face_net_dnn.setInput(blob)
-        detections = self.face_net_dnn.forward()
-        boxes = []
-        scores = []
-        for i in range(detections.shape[2]):
-            confidence = float(detections[0, 0, i, 2])
-            if confidence > self.config.DNN_CONFIDENCE_THRESHOLD:
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                x1, y1, x2, y2 = box.astype(int)
-                x1 = max(0, x1)
-                y1 = max(0, y1)
-                x2 = min(w, x2)
-                y2 = min(h, y2)
-                if (x2 - x1) >= 30 and (y2 - y1) >= 30:
-                    boxes.append([x1, y1, x2, y2])
-                    scores.append(confidence)
-        if boxes:
-            boxes, scores = non_max_suppression(boxes, scores, self.config.DNN_NMS_THRESHOLD)
-        if boxes:
-            boxes = [[int(x) for x in b] for b in boxes]
-            scores = [float(s) for s in scores]
-        return boxes, scores
-
-    def _init_face_detector_cnn(self):
-        model_path = self.config.CNN_FACE_MODEL
-        if not os.path.exists(model_path):
-            logger.warning("CNN face model not found, downloading...")
-            self.model_manager.download_cnn_face_model()
-        try:
-            cnn_detector = dlib.cnn_face_detection_model_v1(model_path)
-            logger.info("Initialized dlib CNN face detector (MMOD)")
-            return cnn_detector
-        except Exception as e:
-            logger.error(f"CNN face detector init failed: {e}")
-            return None
-
-    def detect_faces_cnn(self, gray):
-        if self.face_cnn_detector is None:
-            return []
-        faces = self.face_cnn_detector(gray, 0)
-        boxes = []
-        for f in faces:
-            r = f.rect
-            boxes.append([int(r.left()), int(r.top()), int(r.right()), int(r.bottom())])
-        return boxes
 
     def detect_faces_haar(self, gray):
-        if self.face_cascade is None:
-            return []
-        faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
-        )
+        with self._processing_lock:
+            if self.face_cascade is None or self.face_cascade.empty():
+                return []
+            detections = self.face_cascade.detectMultiScale(
+                np.ascontiguousarray(gray),
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(80, 80),
+            )
+            return [
+                [int(x), int(y), int(x + width), int(y + height)]
+                for x, y, width, height in detections
+            ]
+
+    def detect_faces_dnn(self, frame):
+        with self._processing_lock:
+            if self.face_net_dnn is None:
+                return [], []
+            height, width = frame.shape[:2]
+            blob = cv2.dnn.blobFromImage(
+                cv2.resize(frame, (300, 300)),
+                1.0,
+                (300, 300),
+                (104.0, 177.0, 123.0),
+            )
+            self.face_net_dnn.setInput(blob)
+            detections = self.face_net_dnn.forward()
+            boxes = []
+            scores = []
+
+            for index in range(detections.shape[2]):
+                confidence = float(detections[0, 0, index, 2])
+                if confidence < self.config.DNN_CONFIDENCE_THRESHOLD:
+                    continue
+                box = detections[0, 0, index, 3:7] * np.array(
+                    [width, height, width, height]
+                )
+                x1, y1, x2, y2 = box.astype(int)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(width, x2), min(height, y2)
+                if x2 - x1 >= 45 and y2 - y1 >= 45:
+                    boxes.append([x1, y1, x2, y2])
+                    scores.append(confidence)
+            return boxes, scores
+
+    def _detect_face_boxes(self, frame, gray_equalized):
         boxes = []
-        for (x, y, w, h) in faces:
-            boxes.append([int(x), int(y), int(x + w), int(y + h)])
-        return boxes
-
-    def detect_faces_dlib(self, gray):
-        return self.model_manager.detector(gray)
-
-    def start_camera(self):
-        logger.info("Initializing camera...")
-        if self.camera and self.camera.isOpened():
-            return
-        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY, cv2.CAP_MSMF]
-        for index in [self.config.CAMERA_ID, 1]:
-            for backend in backends:
-                try:
-                    self.camera = cv2.VideoCapture(index, backend)
-                    if self.camera.isOpened():
-                        break
-                    self.camera.release()
-                    self.camera = None
-                except Exception:
-                    self.camera = None
-            if self.camera and self.camera.isOpened():
-                break
-        if not self.camera or not self.camera.isOpened():
-            raise IOError("Cannot open camera")
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.CAMERA_WIDTH)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.CAMERA_HEIGHT)
-        self.camera.set(cv2.CAP_PROP_FPS, self.config.CAMERA_FPS)
+        scores = []
         try:
-            self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-        logger.info("Camera initialized successfully")
-
-    def stop_camera(self):
-        if self.camera and self.camera.isOpened():
-            self.camera.release()
-            self.analyzer.reset_display()
-            self.camera = None
-            logger.info("Camera stopped")
-
-    def detect_blink(self, ear):
-        self.ear_history.append(ear)
-        if len(self.ear_history) < self.blink_consec_frames:
-            return False
-        recent_ear_avg = float(np.mean(list(self.ear_history)[-10:])) if len(self.ear_history) >= 10 else float(np.mean(self.ear_history))
-        min_threshold = self.ear_threshold * 0.6
-        dynamic_threshold = max(min_threshold, min(self.ear_threshold, recent_ear_avg * 0.8))
-        if not self.eye_closed and ear < dynamic_threshold:
-            self.eye_closed = True
-            return False
-        elif self.eye_closed and ear >= dynamic_threshold:
-            self.eye_closed = False
-            current_time = time.time()
-            self.blink_total += 1
-            self.blink_times.append(current_time)
-            return True
-        return False
-
-    def detect_yawn(self, mar):
-        current_time = time.time()
-        if mar > self.yawn_threshold and not self.mouth_open:
-            self.yawn_counter += 1
-            if self.yawn_counter >= self.yawn_consec_frames:
-                if not self.yawn_times or (current_time - self.yawn_times[-1] >= 4):
-                    self.mouth_open = True
-                    self.yawn_counter = 0
-                    self.yawn_total += 1
-                    self.yawn_times.append(current_time)
-                    return True
-                else:
-                    self.yawn_counter = 0
-        elif mar <= self.yawn_threshold and self.mouth_open:
-            self.mouth_open = False
-            self.yawn_counter = 0
-        else:
-            self.yawn_counter = max(0, self.yawn_counter - 1)
-        return False
-
-    def check_yawn_frequency(self):
-        current_time = time.time()
-        recent_yawns = [t for t in self.yawn_times if current_time - t <= 60]
-        return len(recent_yawns) >= self.yawn_per_minute_threshold
-
-    def check_blink_frequency(self):
-        current_time = time.time()
-        recent_blinks = [t for t in self.blink_times if current_time - t <= 60]
-        return len(recent_blinks) >= self.blink_per_minute_threshold
-
-    def reset_counters_if_needed(self):
-        current_time = time.time()
-        if current_time - self.last_reset_time >= 60:
-            self.blink_times.clear()
-            self.yawn_times.clear()
-            self.blink_total = 0
-            self.yawn_total = 0
-            self.fatigue_alert_count = 0
-            self.last_reset_time = current_time
-
-    def process_frame(self):
-        self.reset_counters_if_needed()
-        if not self.camera or not self.camera.isOpened():
-            try:
-                self.start_camera()
-            except Exception as e:
-                logger.error(f"Failed to reinitialize camera: {e}")
-                return None, False, self._empty_metrics()
-
-        ret, frame = self.camera.read()
-        if not ret or frame is None:
-            return None, False, self._empty_metrics()
-
-        frame = cv2.resize(frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT))
-        return self._process_image(frame)
-
-    def process_frame_from_frame(self, frame):
-        self.reset_counters_if_needed()
-        return self._process_image(frame)
-
-    def _process_image(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        gray_eq = self.analyzer.apply_clahe(gray)
-        if self.save_pipeline:
-            stage_images = {}
-            stage_images["01_grayscale"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            stage_images["02_clahe"] = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
-
-        face_boxes = []
-        face_scores = []
-
-        try:
-            faces_haar = self.detect_faces_haar(gray_eq)
-            if faces_haar:
-                face_boxes = faces_haar
-                face_scores = [0.5] * len(faces_haar)
-        except Exception as e:
-            logger.warning(f"Haar detection failed: {e}")
+            haar_boxes = self.detect_faces_haar(gray_equalized)
+            boxes.extend(haar_boxes)
+            scores.extend([0.55] * len(haar_boxes))
+        except Exception as exc:
+            logger.warning("Haar face detection failed: %s", exc)
+            self.face_cascade = self._init_face_cascade()
 
         try:
             dnn_boxes, dnn_scores = self.detect_faces_dnn(frame)
-            if dnn_boxes:
-                if face_boxes:
-                    face_boxes = face_boxes + dnn_boxes
-                    face_scores = face_scores + dnn_scores
-                    face_boxes, face_scores = non_max_suppression(face_boxes, face_scores, self.config.DNN_NMS_THRESHOLD)
-                else:
-                    face_boxes = dnn_boxes
-                    face_scores = list(dnn_scores)
-        except Exception as e:
-            logger.warning(f"DNN detection failed: {e}")
+            boxes.extend(dnn_boxes)
+            scores.extend(dnn_scores)
+        except Exception as exc:
+            logger.warning("DNN face detection failed: %s", exc)
+            self.face_net_dnn = self._init_face_detector_dnn()
 
-        # No slow/blocking CPU-based dlib HOG or CNN fallbacks are used to prevent Python GIL freezes.
-        # Haar Cascade and OpenCV DNN are extremely fast and sufficient.
+        if boxes:
+            boxes, scores = non_max_suppression(
+                boxes, scores, self.config.DNN_NMS_THRESHOLD
+            )
 
-        # Filter out false positives (too small, wrong aspect ratio)
-        img_h, img_w = frame.shape[:2]
-        min_face_size = 45
-        valid_boxes = []
-        valid_scores = []
-        for box, score in zip(face_boxes, face_scores):
-            x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-            bw, bh = x2 - x1, y2 - y1
-            if bw < min_face_size or bh < min_face_size:
+        image_h = frame.shape[0]
+        valid = []
+        for box, score in zip(boxes, scores):
+            clipped_box = self._clip_box(box, frame.shape)
+            if clipped_box is None:
                 continue
-            aspect = bw / bh if bh > 0 else 0
-            if aspect < 0.3 or aspect > 3.0:
+            x1, y1, x2, y2 = clipped_box
+            width, height = x2 - x1, y2 - y1
+            aspect = width / max(1.0, float(height))
+            if width < 45 or height < 45 or not 0.45 <= aspect <= 1.8:
                 continue
-            # Low-confidence detections below 60% of image height are likely false positives
-            if score <= 0.5 and y1 > img_h * 0.6:
+            if score <= 0.55 and y1 > image_h * 0.65:
                 continue
-            valid_boxes.append(box)
-            valid_scores.append(score)
-        if valid_boxes:
-            face_boxes = valid_boxes
-            face_scores = valid_scores
+            valid.append(([x1, y1, x2, y2], float(score)))
+        return valid
 
-        if not face_boxes:
+    @staticmethod
+    def _select_primary_face(detections):
+        if not detections:
+            return None
+        return max(
+            detections,
+            key=lambda item: (
+                (item[0][2] - item[0][0])
+                * (item[0][3] - item[0][1])
+                * max(0.5, item[1])
+            ),
+        )[0]
+
+    def start_camera(self):
+        with self._camera_lock:
+            if self.camera and self.camera.isOpened():
+                return
+            backends = [cv2.CAP_ANY, cv2.CAP_DSHOW, cv2.CAP_MSMF]
+            for index in (self.config.CAMERA_ID, 1):
+                for backend in backends:
+                    try:
+                        camera = cv2.VideoCapture(index, backend)
+                        if camera.isOpened():
+                            self.camera = camera
+                            break
+                        camera.release()
+                    except Exception:
+                        continue
+                if self.camera and self.camera.isOpened():
+                    break
+            if not self.camera or not self.camera.isOpened():
+                raise IOError("Cannot open camera")
+
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.CAMERA_WIDTH)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.CAMERA_HEIGHT)
+            self.camera.set(cv2.CAP_PROP_FPS, self.config.CAMERA_FPS)
+            try:
+                self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+
+    def stop_camera(self):
+        with self._camera_lock:
+            if self.camera and self.camera.isOpened():
+                self.camera.release()
+            self.camera = None
+
+    def read_camera_frame(self):
+        with self._camera_lock:
+            if not self.camera or not self.camera.isOpened():
+                return False, None
+            return self.camera.read()
+
+    def detect_blink(self, eye_openness):
+        is_closed = eye_openness < self.eye_open_threshold
+        if is_closed:
+            self.eye_transition_counter += 1
+            if self.eye_transition_counter >= self.blink_consec_frames:
+                self.eye_closed = True
+            return False
+
+        blink_detected = self.eye_closed
+        self.eye_closed = False
+        self.eye_transition_counter = 0
+        if blink_detected:
+            now = time.time()
+            self.blink_total += 1
+            self.blink_times.append(now)
+        return blink_detected
+
+    def detect_yawn(self, mouth_openness):
+        is_open = mouth_openness > self.mouth_open_threshold
+        if is_open and not self.mouth_open:
+            self.yawn_counter += 1
+            if self.yawn_counter >= self.yawn_consec_frames:
+                now = time.time()
+                if not self.yawn_times or now - self.yawn_times[-1] >= 4.0:
+                    self.mouth_open = True
+                    self.yawn_counter = 0
+                    self.yawn_total += 1
+                    self.yawn_times.append(now)
+                    return True
+                self.yawn_counter = 0
+        elif not is_open:
+            self.mouth_open = False
+            self.yawn_counter = 0
+        return False
+
+    def check_yawn_frequency(self):
+        now = time.time()
+        return sum(now - timestamp <= 60 for timestamp in self.yawn_times) >= (
+            self.yawn_per_minute_threshold
+        )
+
+    def check_blink_frequency(self):
+        now = time.time()
+        return sum(now - timestamp <= 60 for timestamp in self.blink_times) >= (
+            self.blink_per_minute_threshold
+        )
+
+    def reset_counters_if_needed(self):
+        now = time.time()
+        if now - self.last_reset_time < 60:
+            return
+        self.blink_times.clear()
+        self.yawn_times.clear()
+        self.blink_total = 0
+        self.yawn_total = 0
+        self.fatigue_alert_count = 0
+        self.last_reset_time = now
+
+    def process_frame(self):
+        with self._processing_lock:
+            self.reset_counters_if_needed()
+            if not self.camera or not self.camera.isOpened():
+                try:
+                    self.start_camera()
+                except Exception as exc:
+                    logger.error("Failed to initialize camera: %s", exc)
+                    return None, False, self._empty_metrics()
+
+            success, frame = self.read_camera_frame()
+            if not success or frame is None:
+                return None, False, self._empty_metrics()
+            frame = cv2.resize(
+                frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT)
+            )
+            return self._process_image(frame)
+
+    def process_frame_from_frame(self, frame):
+        with self._processing_lock:
+            normalized = self._normalize_frame(frame)
+            if normalized is None:
+                logger.warning("Skipping invalid input frame")
+                return None, False, self._empty_metrics()
+            self.reset_counters_if_needed()
+            return self._process_image(normalized)
+
+    @staticmethod
+    def _normalize_frame(frame):
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            return None
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        elif frame.ndim != 3:
+            return None
+        elif frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        elif frame.shape[2] != 3:
+            return None
+        if frame.shape[0] < 2 or frame.shape[1] < 2:
+            return None
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        return np.ascontiguousarray(frame)
+
+    @staticmethod
+    def _clip_box(box, image_shape):
+        try:
+            values = np.asarray(box, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if values.size != 4 or not np.all(np.isfinite(values)):
+            return None
+        image_h, image_w = image_shape[:2]
+        x1 = max(0, min(image_w, int(np.floor(values[0]))))
+        y1 = max(0, min(image_h, int(np.floor(values[1]))))
+        x2 = max(0, min(image_w, int(np.ceil(values[2]))))
+        y2 = max(0, min(image_h, int(np.ceil(values[3]))))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _feature_montage(regions):
+        tiles = []
+        for name in ("left_eye", "right_eye", "mouth"):
+            region = regions.get(name)
+            if region is None:
+                continue
+            edges = cv2.resize(region.edges, (140, 84), interpolation=cv2.INTER_NEAREST)
+            mask = cv2.resize(
+                region.dark_mask, (140, 84), interpolation=cv2.INTER_NEAREST
+            )
+            tiles.extend([edges, mask])
+        if not tiles:
+            return np.zeros((84, 140), dtype=np.uint8)
+        return np.hstack(tiles)
+
+    def _save_pipeline(self, stage_images):
+        if not self.save_pipeline:
+            return
+        if self.pipeline is None:
+            self.pipeline = PipelineStage()
+        frame_id = int(time.time() * 1000) % 100000
+        for name, image in stage_images.items():
+            self.pipeline.save_stage(name, image, frame_id=frame_id)
+
+    def _process_image(self, frame):
+        frame = self._normalize_frame(frame)
+        if frame is None:
+            return None, False, self._empty_metrics()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_equalized = self.analyzer.apply_clahe(gray)
+        stage_images = {
+            "01_grayscale": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+            "02_clahe": cv2.cvtColor(gray_equalized, cv2.COLOR_GRAY2BGR),
+        }
+
+        detections = self._detect_face_boxes(frame, gray_equalized)
+        face_box = self._select_primary_face(detections)
+        face_box = self._clip_box(face_box, frame.shape) if face_box else None
+        if face_box is None:
             self.no_face_counter += 1
             self.face_detected = False
-            if self.save_pipeline:
-                stage_images["03_face_detection"] = frame.copy()
+            stage_images["03_face_detection"] = frame.copy()
             if self.no_face_counter >= self.no_face_alert_frames:
                 frame = self.alert_system.render_distraction_alert(frame)
-                if self.save_pipeline:
-                    for name, img in stage_images.items():
-                        self.pipeline.save_stage(name, img)
-                return frame, True, self._empty_metrics()
-            frame = self.alert_system.put_text_unicode(frame, "Không phát hiện khuôn mặt", (20, 30), self.config.ALERT_COLOR, font_size=24)
-            if self.save_pipeline:
-                stage_images["03_face_detection"] = frame.copy()
-                for name, img in stage_images.items():
-                    self.pipeline.save_stage(name, img)
+                metrics = self._empty_metrics()
+                metrics["distraction_detected"] = True
+                self._save_pipeline(stage_images)
+                return frame, True, metrics
+            frame = self.alert_system.put_text_unicode(
+                frame,
+                "Không phát hiện khuôn mặt",
+                (20, 30),
+                self.config.ALERT_COLOR,
+                font_size=24,
+            )
+            self._save_pipeline(stage_images)
             return frame, False, self._empty_metrics()
 
         self.no_face_counter = 0
         self.face_detected = True
+        face_visualization = frame.copy()
+        for detected_box, _ in detections:
+            clipped_box = self._clip_box(detected_box, frame.shape)
+            if clipped_box is None:
+                continue
+            dx1, dy1, dx2, dy2 = clipped_box
+            cv2.rectangle(
+                face_visualization, (dx1, dy1), (dx2, dy2), (0, 255, 0), 1
+            )
+        stage_images["03_face_detection"] = face_visualization
 
-        face_box = face_boxes[0]
-        if self.save_pipeline:
-            face_vis = frame.copy()
-            for fb in face_boxes:
-                cv2.rectangle(face_vis, (int(fb[0]), int(fb[1])), (int(fb[2]), int(fb[3])), (0, 255, 0), 2)
-            stage_images["03_face_detection"] = face_vis
+        analysis = self.analyzer.analyze_face(gray, face_box)
+        feature_state = classify_face_features(
+            analysis,
+            face_box,
+            eye_open_threshold=self.eye_open_threshold,
+            mouth_open_threshold=self.mouth_open_threshold,
+            min_face_size=self.config.FEATURE_MIN_FACE_SIZE,
+            eye_min_confidence=self.config.EYE_FEATURE_MIN_CONFIDENCE,
+            mouth_min_confidence=self.config.MOUTH_FEATURE_MIN_CONFIDENCE,
+        )
 
-        drowsiness_detected = False
-        head_tilt_detected = False
-        fatigue_detected = False
-        ear = 0.0
-        mar = 0.0
-        roll_angle = 0.0
-        pitch_angle = 0.0
-        pitch_ratio = 0.0
-
-        dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
-
-        if dlib_face:
-            shape = self.landmark_predictor(gray_eq, dlib_face)
-            shape_np = np.array([[p.x, p.y] for p in shape.parts()])
-
-            left_eye = shape_np[36:42]
-            right_eye = shape_np[42:48]
-            mouth = shape_np[48:68]
-
-            left_ear = self.analyzer.calculate_ear(left_eye)
-            right_ear = self.analyzer.calculate_ear(right_eye)
-            ear = (left_ear + right_ear) / 2.0
-            mar = self.analyzer.calculate_mar(mouth)
-            roll_angle, pitch_angle, pitch_ratio = self.analyzer.calculate_head_pose(shape_np)
-
-            if not self.calibrated:
-                self.roll_history.append(roll_angle)
-                self.pitch_history.append(pitch_angle)
-                if len(self.roll_history) >= self.config.CALIBRATION_FRAMES:
-                    self.reference_roll = float(np.median(self.roll_history))
-                    self.reference_pitch = float(np.median(self.pitch_history))
-                    self.calibrated = True
-            elif self.reference_roll is not None:
-                drift = 0.002
-                self.reference_roll = (1 - drift) * self.reference_roll + drift * roll_angle
-                self.reference_pitch = (1 - drift) * self.reference_pitch + drift * pitch_angle
-
-            if self.save_pipeline:
-                edges_left = self.analyzer.apply_canny_on_eye(gray_eq, left_eye, 50, 150)
-                edges_right = self.analyzer.apply_canny_on_eye(gray_eq, right_eye, 50, 150)
-                self._last_canny_left = edges_left
-                self._last_canny_right = edges_right
-
-                iris_area_left = self.analyzer.detect_iris_by_contour(edges_left)
-                iris_area_right = self.analyzer.detect_iris_by_contour(edges_right)
-
-                roi_vis = frame.copy()
-                cv2.polylines(roi_vis, [left_eye], True, (0, 255, 0), 1)
-                cv2.polylines(roi_vis, [right_eye], True, (0, 255, 0), 1)
-                cv2.polylines(roi_vis, [mouth], True, (0, 255, 0), 1)
-                stage_images["04_landmarks_roi"] = roi_vis
-
-                if edges_left.size > 0 and edges_right.size > 0:
-                    h_l, w_l = edges_left.shape
-                    h_r, w_r = edges_right.shape
-                    max_h = max(h_l, h_r)
-                    combined_w = w_l + w_r
-                    canny_vis = np.zeros((max_h, combined_w), dtype=np.uint8)
-                    canny_vis[:h_l, :w_l] = edges_left
-                    canny_vis[:h_r, w_l:w_l + w_r] = edges_right
-                    stage_images["05_canny_edges"] = cv2.cvtColor(canny_vis, cv2.COLOR_GRAY2BGR)
-
-            self.detect_blink(ear)
-            self.detect_yawn(mar)
-            blink_frequent = self.check_blink_frequency()
-            yawn_frequent = self.check_yawn_frequency()
-            fatigue_detected = blink_frequent or yawn_frequent
-
-            if self.eye_closed:
-                self.eye_closed_counter += 1
-            else:
-                self.eye_closed_counter = 0
-
-            delta_roll = abs(roll_angle - self.reference_roll) if self.reference_roll is not None else 0
-            delta_pitch = abs(pitch_angle - self.reference_pitch) if self.reference_pitch is not None else 0
-            head_tilted = delta_roll > self.roll_threshold or delta_pitch > self.pitch_threshold
-            if head_tilted:
-                self.head_tilt_counter += 1
-                if self.head_tilt_counter >= self.head_tilt_frames:
-                    head_tilt_detected = True
-            else:
-                self.head_tilt_counter = max(0, self.head_tilt_counter - 1)
-
-            if ear < self.ear_threshold or self.eye_closed_counter >= self.ear_consec_frames:
+        eye_openness = analysis.eye_openness
+        mouth_openness = analysis.mouth_openness
+        if feature_state.eye_valid:
+            self.detect_blink(eye_openness)
+            if feature_state.eye_closed:
                 self.eye_counter += 1
                 if self.eye_counter == 1:
                     self.drowsiness_start_time = time.time()
-                if self.eye_counter >= self.ear_consec_frames:
-                    drowsiness_detected = True
-                    drowsiness_duration = time.time() - self.drowsiness_start_time
-                    frame = self.alert_system.render_drowsiness_alert(frame, drowsiness_duration)
             else:
                 self.eye_counter = 0
                 self.drowsiness_start_time = None
+        else:
+            self.eye_counter = max(0, self.eye_counter - 1)
 
-            if head_tilt_detected:
-                frame = self.alert_system.render_head_tilt_alert(frame)
-            if fatigue_detected and self.fatigue_alert_count < 1:
-                if self.fatigue_start_time is None:
-                    self.fatigue_start_time = time.time()
-                frame = self.alert_system.render_fatigue_alert(frame)
-                if time.time() - self.fatigue_start_time >= self.notification_duration:
-                    self.fatigue_alert_count += 1
-                    self.fatigue_start_time = None
+        if feature_state.mouth_valid:
+            self.detect_yawn(mouth_openness)
 
-            self.draw_facial_ratios(frame, shape_np)
+        drowsiness_detected = self.eye_counter >= self.eye_closed_consec_frames
+        fatigue_detected = self.check_blink_frequency() or self.check_yawn_frequency()
 
-        if self.save_pipeline:
-            stage_images["06_result"] = frame
+        if drowsiness_detected:
+            duration = (
+                time.time() - self.drowsiness_start_time
+                if self.drowsiness_start_time is not None
+                else 0.0
+            )
+            frame = self.alert_system.render_drowsiness_alert(frame, duration)
+        if fatigue_detected and self.fatigue_alert_count < 1:
+            if self.fatigue_start_time is None:
+                self.fatigue_start_time = time.time()
+            frame = self.alert_system.render_fatigue_alert(frame)
+            if time.time() - self.fatigue_start_time >= self.notification_duration:
+                self.fatigue_alert_count += 1
+                self.fatigue_start_time = None
 
-        if self.save_pipeline:
-            fid = int(time.time() * 1000) % 100000
-            for name, img in stage_images.items():
-                self.pipeline.save_stage(name, img, frame_id=fid)
+        self.analyzer.draw_features(frame, face_box, analysis)
+        stage_images["04_edge_feature_rois"] = frame.copy()
+        feature_montage = self._feature_montage(analysis.regions)
+        stage_images["05_edges_and_masks"] = cv2.cvtColor(
+            feature_montage, cv2.COLOR_GRAY2BGR
+        )
+        stage_images["06_result"] = frame.copy()
+        self._save_pipeline(stage_images)
+
+        left_eye = analysis.regions.get("left_eye")
+        right_eye = analysis.regions.get("right_eye")
+        self._last_canny_left = left_eye.edges if left_eye is not None else None
+        self._last_canny_right = right_eye.edges if right_eye is not None else None
 
         metrics = {
-            'ear': ear,
-            'mar': mar,
-            'roll_angle': roll_angle,
-            'pitch_angle': pitch_angle,
-            'pitch_ratio': pitch_ratio,
-            'blink_count': self.blink_total,
-            'yawn_count': self.yawn_total,
-            'face_detected': self.face_detected,
-            'head_tilt_detected': head_tilt_detected,
-            'fatigue_detected': fatigue_detected,
-            'drowsiness_detected': drowsiness_detected,
-            'eye_counter': self.eye_counter,
-            'head_tilt_counter': self.head_tilt_counter,
+            "eye_openness": eye_openness,
+            "mouth_openness": mouth_openness,
+            "eye_confidence": analysis.eye_confidence,
+            "mouth_confidence": analysis.mouth_confidence,
+            "eye_candidate_count": analysis.eye_candidate_count,
+            "blink_count": self.blink_total,
+            "yawn_count": self.yawn_total,
+            "face_detected": True,
+            "analysis_valid": feature_state.analysis_valid,
+            "eye_analysis_valid": feature_state.eye_valid,
+            "mouth_analysis_valid": feature_state.mouth_valid,
+            "eye_closed": feature_state.eye_closed,
+            "yawning": feature_state.yawning,
+            "fatigue_detected": fatigue_detected,
+            "drowsiness_detected": drowsiness_detected,
+            "distraction_detected": False,
+            "eye_counter": self.eye_counter,
         }
-        return frame, drowsiness_detected or head_tilt_detected or fatigue_detected, metrics
-
-    def draw_facial_ratios(self, frame, shape_np):
-        if not frame.flags['C_CONTIGUOUS']:
-            frame = np.ascontiguousarray(frame)
-        for i in range(68):
-            cv2.circle(frame, tuple(shape_np[i]), 1, self.config.PRIMARY_COLOR, -1)
-        cv2.polylines(frame, [shape_np[36:42]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[42:48]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[48:60]], True, self.config.PRIMARY_COLOR, 1)
-        cv2.polylines(frame, [shape_np[27:36]], True, self.config.PRIMARY_COLOR, 1)
-        return frame
+        return frame, drowsiness_detected or fatigue_detected, metrics
 
     def reset_calibration(self):
-        self.calibration_ear_values = []
-
-    def reset_head_reference(self):
-        self.reference_roll = None
-        self.reference_pitch = None
-        self.roll_history.clear()
-        self.pitch_history.clear()
-        self.calibrated = False
+        self.calibration_eye_values = []
 
     def process_calibration_frame(self):
-        if not self.camera or not self.camera.isOpened():
-            return None, 0.0
-        ret, frame = self.camera.read()
-        if not ret or frame is None:
-            return None, 0.0
-        frame = cv2.resize(frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT))
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_eq = self.analyzer.apply_clahe(gray)
-        # Unified face detection for calibration (fast, no GIL freeze)
-        face_boxes = []
-        try:
-            faces_haar = self.detect_faces_haar(gray_eq)
-            if faces_haar:
-                face_boxes = faces_haar
-        except Exception:
-            pass
-        if not face_boxes:
-            try:
-                dnn_boxes, _ = self.detect_faces_dnn(frame)
-                if dnn_boxes:
-                    face_boxes = dnn_boxes
-            except Exception:
-                pass
-
-        ear = 0.0
-        if face_boxes:
-            face_box = face_boxes[0]
-            dlib_face = dlib.rectangle(int(face_box[0]), int(face_box[1]), int(face_box[2]), int(face_box[3]))
-            shape = self.landmark_predictor(gray_eq, dlib_face)
-            shape_np = np.array([[p.x, p.y] for p in shape.parts()])
-            left_eye = shape_np[36:42]
-            right_eye = shape_np[42:48]
-            left_ear = self.analyzer.calculate_ear(left_eye)
-            right_ear = self.analyzer.calculate_ear(right_eye)
-            ear = (left_ear + right_ear) / 2.0
-            self.calibration_ear_values.append(ear)
-            self.draw_facial_ratios(frame, shape_np)
-        return frame, ear
+        with self._processing_lock:
+            if not self.camera or not self.camera.isOpened():
+                return None, 0.0
+            success, frame = self.read_camera_frame()
+            if not success or frame is None:
+                return None, 0.0
+            frame = cv2.resize(
+                frame, (self.config.CAMERA_WIDTH, self.config.CAMERA_HEIGHT)
+            )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_equalized = self.analyzer.apply_clahe(gray)
+            face_box = self._select_primary_face(
+                self._detect_face_boxes(frame, gray_equalized)
+            )
+            eye_openness = 0.0
+            if face_box is not None:
+                analysis = self.analyzer.analyze_face(gray, face_box)
+                if (
+                    analysis.eye_confidence
+                    >= self.config.EYE_FEATURE_MIN_CONFIDENCE
+                ):
+                    eye_openness = analysis.eye_openness
+                    self.calibration_eye_values.append(eye_openness)
+                self.analyzer.draw_features(frame, face_box, analysis)
+            return frame, eye_openness
 
     def finalize_calibration(self):
-        if self.calibration_ear_values:
-            avg_ear = float(np.mean(self.calibration_ear_values))
-            new_threshold = avg_ear * 0.9
-            self.ear_threshold = new_threshold
-            self.config.save_calibration(new_threshold)
-            self.calibration_ear_values = []
-            return True, new_threshold
-        self.calibration_ear_values = []
-        return False, self.ear_threshold
+        if not self.calibration_eye_values:
+            return False, self.eye_open_threshold
+        normal_eye_openness = float(np.median(self.calibration_eye_values))
+        new_threshold = float(np.clip(normal_eye_openness * 0.90, 0.03, 0.60))
+        self.eye_open_threshold = new_threshold
+        self.config.save_calibration(new_threshold)
+        self.calibration_eye_values = []
+        return True, new_threshold
 
-    @staticmethod
-    def _empty_metrics():
+    def _empty_metrics(self):
         return {
-            'ear': 0.0, 'mar': 0.0, 'roll_angle': 0.0, 'pitch_angle': 0.0,
-            'pitch_ratio': 0.0,
-            'blink_count': 0, 'yawn_count': 0, 'face_detected': False,
-            'head_tilt_detected': False, 'fatigue_detected': False,
-            'drowsiness_detected': False, 'eye_counter': 0, 'head_tilt_counter': 0,
+            "eye_openness": 0.0,
+            "mouth_openness": 0.0,
+            "eye_confidence": 0.0,
+            "mouth_confidence": 0.0,
+            "eye_candidate_count": 0,
+            "blink_count": self.blink_total,
+            "yawn_count": self.yawn_total,
+            "face_detected": False,
+            "analysis_valid": False,
+            "eye_analysis_valid": False,
+            "mouth_analysis_valid": False,
+            "eye_closed": False,
+            "yawning": False,
+            "fatigue_detected": False,
+            "drowsiness_detected": False,
+            "distraction_detected": False,
+            "eye_counter": self.eye_counter,
         }
 
     def __del__(self):

@@ -1,1 +1,1 @@
-from src.evaluation.metrics import MetricsCollector, evaluate_on_video
+"""Evaluation tools for the edge/feature pipeline."""

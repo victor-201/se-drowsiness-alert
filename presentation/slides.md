@@ -4,200 +4,228 @@ theme: uncover
 class: invert
 ---
 
-# <!--fit--> Ứng Dụng Cảnh Báo Phát Hiện Buồn Ngủ Lái Xe
+# Ứng Dụng Cảnh Báo Buồn Ngủ Lái Xe
 
-**Môn:** Xử Lý Ảnh & Thị Giác Máy Tính — 121036  
-**ĐH Giao thông Vận tải TP.HCM**
+**Pipeline không dùng facial landmarks**
 
----
-
-## Vấn Đề & Động Lực
-
-<!-- Mục 1: Đặt vấn đề -->
-
-- ~20% tai nạn giao thông liên quan đến buồn ngủ (WHO)
-- Phát hiện sớm dấu hiệu buồn ngủ → giảm tai nạn
-- **Mục tiêu:** Hệ thống real-time phát hiện nhắm mắt, ngáp, nghiêng đầu
-
-**Giả thuyết:** EAR=0.22, MAR=0.30, HEAD_TILT=15° cho F1 ≥ 0.85
-
-**Dữ liệu:** Webcam thực tế — 640×480, 30 FPS
+Môn Xử Lý Ảnh & Thị Giác Máy Tính - 121036
 
 ---
 
-## Pipeline Tổng Quan
+## Mục Tiêu
 
-```
-Camera → Tiền xử lý → Face Detection → Landmarks → ROI → Phân loại → Cảnh báo
-  (BGR)   (Gray+CLAHE)  (Haar+DNN+CNN+NMS) (68 điểm) (Mắt/Miệng) (EAR/MAR)  (Âm thanh)
-                               ↓
-                          Canny Edge + Otsu Threshold
-                               ↓
-                     Connected Components → Iris detection
-```
-
-**6 kỹ thuật từ chương trình học:**  
-| Ch. | Kỹ thuật |
-|-----|----------|
-| 2 | Grayscale, CLAHE, lọc Gaussian |
-| 3 | Haar Cascade, DNN SSD, CNN MMOD (dlib fallback), Canny edge (Sobel, NMS, hysteresis), 68 landmarks |
-| 4 | ROI segmentation, **Otsu threshold**, **Connected Components** |
-| 5 | Threshold classification (EAR, MAR, head pose) |
-
-→ **5/6 kỹ thuật thuộc Ch.3–5** (đáp ứng yêu cầu ≥2 kỹ thuật chuyên sâu)
+- Phát hiện nhắm mắt kéo dài.
+- Phát hiện ngáp.
+- Loại bỏ dlib và model 68 landmarks.
+- Dùng kỹ thuật cạnh, phân đoạn và điểm đặc trưng có thể giải thích.
+- So sánh định lượng với baseline landmark trên cùng ground truth.
 
 ---
 
-## Ảnh Minh Họa Trung Gian
+## Pipeline Mới
 
-<!-- Yêu cầu bắt buộc: ảnh sau từng bước xử lý -->
-
-```
-Ảnh gốc → Grayscale → CLAHE → Face Detection → Landmarks → ROI → Canny → Kết quả
+```text
+Camera
+  -> Grayscale + CLAHE
+  -> Haar/DNN face detection + NMS
+  -> ROI mắt và miệng
+  -> Gaussian + Canny + Otsu
+  -> Connected components + Shi-Tomasi
+  -> Eye/Mouth openness
+  -> Bộ đếm frame + cảnh báo
 ```
 
-**Kỹ thuật Ch.2 — Tiền xử lý:**  
-`Ảnh gốc (BGR)` → `Grayscale` → `CLAHE (clip=2.0, tile=8×8)`
+Không còn:
 
-**Kỹ thuật Ch.3 — Phát hiện khuôn mặt:**  
-`Haar Cascade` → `DNN SSD` → `CNN MMOD (fallback)` → `NMS (IoU=0.4)` → `False Positive Filter` → `dlib 68 landmarks`
-
-**Kỹ thuật Ch.3 — Phát hiện cạnh & đặc trưng:**  
-`Canny edge (sigma=1.0)` → `Otsu threshold` → `Connected Components`
-
-**Kỹ thuật Ch.4 — Phân đoạn:**  
-`ROI mắt/miệng` → `Otsu threshold tự động` → `Connected Components (blob)`
+- 68 facial landmarks.
+- EAR/MAR từ landmark.
+- Head pose, roll, pitch.
+- CNN MMOD dlib fallback.
 
 ---
 
-## Phân Công Công Việc
+## ROI Và Đặc Trưng
 
-| TV | Vai trò | Ch. | Công việc chính |
-|----|---------|:---:|-----------------|
-| **[Nhóm trưởng]** | Kiến trúc hệ thống | — | Thiết kế pipeline, tích hợp module, quản lý tiến độ |
-| SV2 | Tiền xử lý ảnh | **Ch.2** | Grayscale, CLAHE, lọc Gaussian |
-| SV3 | Phát hiện khuôn mặt & Landmark | **Ch.3** | Haar Cascade, HOG, DNN, 68 landmarks |
-| SV4 | Phát hiện cạnh | **Ch.3** | Canny edge (Sobel, NMS, hysteresis) |
-| SV5 | Phân đoạn ảnh | **Ch.4** | ROI, Otsu threshold, Connected Components |
-| SV6 | Nhận dạng & Phân loại | **Ch.5** | EAR, MAR, head pose, threshold classification |
-| SV7 | UI, Cảnh báo & Đánh giá | — | Kivy, alert, metrics, notebook, báo cáo |
+**Mắt**
 
----
+- Haar-like eye candidates.
+- Fallback ROI theo tỷ lệ bounding box mặt.
+- Cạnh mí mắt, vùng tối và phân tán điểm góc.
 
-## Demo
+**Miệng**
 
-![height:350px](https://via.placeholder.com/640x480/1a1a2e/ffffff?text=Demo+Live)
-
-**Tính năng:**
-- 👁️ EAR — phát hiện nhắm mắt
-- 👄 MAR — phát hiện ngáp
-- 🤕 Head Pose — phát hiện nghiêng đầu
-- 🔊 Cảnh báo âm thanh + hình ảnh
+- ROI theo tỷ lệ khuôn mặt.
+- Khoang miệng tối và độ mở theo phương dọc.
+- Hệ số darkness giảm nhầm môi khép/bóng.
 
 ---
 
-## Khảo Sát Canny Edge (sigma)
+## Công Thức Chỉ Số
 
-| Sigma | Chất lượng cạnh |
-|-------|----------------|
-| **0.5** | Nhiễu, khó xác định đồng tử |
-| **1.0** | Cân bằng — viền mí & đồng tử rõ ✅ |
-| **1.5** | Mất chi tiết nhỏ, đồng tử không rõ |
+```text
+opening = 0.58 * dark_aspect
+        + 0.27 * edge_aspect
+        + 0.15 * keypoint_aspect
+```
 
-+ Otsu threshold tự động thay vì ngưỡng cố định
+- `dark_aspect`: tỷ lệ cao/rộng của vùng tối.
+- `edge_aspect`: độ phân tán dọc của cạnh.
+- `keypoint_aspect`: độ phân tán dọc/ngang của Shi-Tomasi points.
 
----
-
-## Kết Quả Khảo Sát EAR
-
-| Ngưỡng | Precision | Recall | F1 |
-|--------|-----------|--------|----|
-| 0.16 | 1.000 | 0.467 | 0.636 |
-| **0.22** | **0.944** | **0.900** | **0.921** |
-| 0.26 | 0.667 | 0.967 | 0.789 |
-
-<!-- 
-Nhận xét: 
-- EAR=0.22 tối ưu (F1=0.921)
-- EAR thấp: bỏ sót nhiều
-- EAR cao: dương tính giả
--->
+Miệng nhân thêm hệ số darkness.
 
 ---
 
-## Kết Quả Khảo Sát MAR & Head Tilt
+## Ngưỡng Và Trạng Thái
 
-**MAR:**
-| Ngưỡng | F1 |
-|--------|----|
-| 0.25 | 0.769 |
-| **0.30** | **0.909** |
-| 0.40 | 0.727 |
+| Tham số | Giá trị |
+|---|---:|
+| Eye openness threshold | 0.20 |
+| Closed-eye consecutive frames | 15 |
+| Mouth openness threshold | 0.35 |
+| Yawn consecutive frames | 5 |
+| Minimum face size | 80 px |
+| Feature confidence | 0.25 |
 
-**Head Tilt:**
-| Ngưỡng | F1 |
-|--------|----|
-| 10° | 0.706 |
-| **15°** | **0.857** |
-| 20° | 0.870 |
+Calibration thu độ mở mắt bình thường trong 5 giây và đặt ngưỡng bằng median x 0.90.
 
 ---
 
-## Kết Quả Tổng Thể
+## Test Tự Động
 
-<!-- Confusion Matrix summary -->
+```bash
+python -m unittest discover -s tests -v
+```
 
-| Chỉ số | Giá trị |
-|---------|---------|
-| Accuracy | **0.950** |
-| Precision | **0.921** |
-| Recall | **0.933** |
-| F1-score | **0.927** |
-| FP Rate | 0.027 |
+Kết quả ngày 19/07/2026:
 
-✅ **Đạt mục tiêu F1 ≥ 0.85**
-
----
-
-## Đối Chiếu Giả Thuyết
-
-| Giả thuyết | Kết quả |
-|------------|---------|
-| EAR thấp → giảm nhạy ✅ | Recall 0.967 → 0.467 |
-| MAR=0.30 cho F1 tốt nhất ✅ | F1=0.909 |
-| HEAD_TILT=15° cho F1 tốt ✅ | F1=0.857 |
-| F1 tổng thể ≥ 0.85 ✅ | **F1=0.927** |
+- 14/14 test đạt.
+- Mắt mở/nhắm tại 3 mức sáng.
+- Miệng bình thường/ngáp tại 3 mức sáng.
+- Regression trên ảnh thật.
+- Bộ đếm frame nhắm mắt.
+- Một lần ngáp cho một chu kỳ mở miệng.
+- Confusion matrix và F1 edge cases.
+- Benchmark ROI xuất CSV/JSON/Markdown.
+- Concurrency lock và kiểm tra frame/ROI ngoài biên.
 
 ---
 
-## Thảo Luận
+## Sanity-Check Ảnh Thật
 
-**Hiệu quả:**
-- Kết hợp đa chỉ số (EAR + MAR + head pose + tần suất)
-- Dynamic threshold cho blink detection
-- Calibration theo từng người
+| Mẫu | Ground truth | Landmark EAR | Landmark | Eye openness | Pipeline mới |
+|---|---|---:|---|---:|---|
+| Tài xế | Mắt mở | 0.317 | Đúng | 0.237 | Đúng |
+| Hành khách nghiêng | Mắt nhắm | 0.273 | Sai | 0.193 | Đúng |
 
-**Hạn chế:**
-- Nhạy với ánh sáng yếu
-- Khó phát hiện khi đeo kính
-- Mất dấu khi góc quay > 45°
+Trên 2 mẫu:
+
+- Landmark eye accuracy: 50%.
+- Edge/feature eye accuracy: 100%.
+- Không có mẫu ngáp dương tính nên yawn recall/F1 chưa xác định.
+
+---
+
+## Fixture ROI Có Kiểm Soát
+
+12 mẫu = 3 mức sáng x 4 tổ hợp trạng thái.
+
+| Chức năng | Landmark F1 | Edge/feature F1 |
+|---|---:|---:|
+| Nhắm mắt | 1.000 | 1.000 |
+| Ngáp | 0.000 | 1.000 |
+
+- Valid eye/mouth/feature coverage: 100%.
+- Face detection được bỏ qua bằng bounding box gán sẵn.
+- Chỉ xác nhận test chức năng, không đại diện dữ liệu người thật.
+
+---
+
+## Dung Lượng Và Phụ Thuộc
+
+| Tài nguyên xóa | Kích thước |
+|---|---:|
+| Shape predictor 68 | 99,693,937 byte |
+| CNN MMOD | 729,940 byte |
+| Tổng | 95.77 MiB |
+
+`dlib` đã được xóa khỏi dependencies.
+
+---
+
+## Benchmark Trích Đặc Trưng
+
+Sau warm-up, 5 batch x 100 khuôn mặt trên macOS arm64:
+
+| Phương pháp | Median ms/face | FPS tương đương |
+|---|---:|---:|
+| Landmark cũ | 0.714 | 1400.64 |
+| Cạnh + điểm đặc trưng | 17.089 | 58.52 |
+
+Pipeline mới chậm hơn do chạy nhiều phép xử lý ảnh trên ROI.
+
+Phép đo không gồm face detection, camera và UI.
+
+---
+
+## Benchmark Chính Thức
+
+```bash
+python -m src.evaluation.metrics \
+  --video test.mp4 \
+  --labels labels.csv \
+  --landmark-baseline landmark.csv \
+  --output evaluation_results
+```
+
+Hoặc đánh giá ROI gán sẵn:
+
+```bash
+python -m src.evaluation.metrics \
+  --roi-manifest roi_manifest.csv \
+  --landmark-baseline landmark.csv \
+  --output evaluation_results
+```
+
+Kết quả:
+
+- Confusion matrix từng chức năng.
+- Accuracy, precision, recall, specificity, F1, FPR.
+- Processing time/FPS.
+- Face-detection coverage.
+- Eye/mouth/valid-feature coverage.
+
+---
+
+## Đánh Giá Lại
+
+**Đã xác nhận**
+
+- Không còn landmark/dlib trong runtime.
+- Giảm 95.77 MiB model.
+- Hai chức năng có test tự động.
+- Ca mắt nhắm nghiêng trong ảnh mẫu được xử lý tốt hơn baseline.
+- Fixture có kiểm soát đạt 100% coverage và tách đủ mắt/ngáp.
+
+**Chưa xác nhận**
+
+- Chưa đủ dữ liệu người thật để kết luận F1 tốt hơn.
+- Chưa có ngáp dương tính thật trong repository.
+- Tốc độ mới thấp hơn landmark ở bước trích đặc trưng.
 
 ---
 
 ## Kết Luận
 
-- ✅ Pipeline hoàn chỉnh với **6 kỹ thuật CV** (5 thuộc Ch.3–5)
-- ✅ Kỹ thuật: CLAHE, Haar Cascade, DNN SSD, CNN MMOD (dlib fallback), Canny edge, 68 landmarks, Otsu, Connected Components, EAR/MAR/Head Pose
-- ✅ Tham số tối ưu: EAR=0.22, MAR=0.30, HEAD_TILT=15°
-- ✅ F1-score **0.927** — vượt mục tiêu 0.85
-- ✅ Dữ liệu thực tế (webcam), độ trễ < 1s
-- ✅ Cả 4 giả thuyết đều được kiểm chứng đúng
-- ✅ 1.200+ dòng Python, kiến trúc MVC rõ ràng
-- 📊 Notebook + Báo cáo đầy đủ thí nghiệm (ảnh trung gian + khảo sát tham số)
+Pipeline mới tốt hơn về:
+
+- Phụ thuộc.
+- Dung lượng.
+- Khả năng giải thích.
+- Khả năng test từng bước.
+
+Cần tập video gán nhãn chung cho hai phương pháp trước khi khẳng định độ chính xác tổng quát.
 
 ---
 
-## Q&A
-
-<!--fit--> Cảm ơn thầy và các bạn!
-
+# Q&A
